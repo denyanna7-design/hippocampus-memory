@@ -64,7 +64,7 @@ Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/e
 
 **Guarantees.**
 1. Nothing is ever deleted.
-2. Every memory can always be reconstructed: schemas are pinned lossless, and every read is integrity-checked with a 64-bit sha256 tag (of the original for lossless memories, of the reconstruction for lossy ones).
+2. Every memory can always be reconstructed: schemas are pinned lossless, and every read is integrity-checked with a 64-bit sha256 tag (of the original for lossless memories, of the reconstruction for lossy ones). `memory_stats.unrecoverable` is measured, not assumed: every memory is decoded and hash-checked. A damaged blob is reported there and does not stop the rest of the store from loading.
 3. A memory's measured fidelity is never below its tier floor. Fidelity is computed against the original at compression time and stored per node.
 4. High-salience memories, delta bases and memories without a schema stay byte-exact.
 5. A lossy memory never "warms" back up. A recalled lossless memory returns to the warm tier.
@@ -75,11 +75,12 @@ Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/e
 
 | Store | Raw | Content | Dictionary | Index | Total on disk |
 |---|---|---|---|---|---|
-| `alexa:demo:full` (151 memories, 30 days) | 23.7 KB | 5.3 KB | 2.6 KB | 8.7 KB | 16.6 KB |
+| `alexa:demo:full` (151 memories, 30 days) | 23.7 KB | 5.3 KB | 2.6–3.5 KB | 8.7 KB | 16.6–17.3 KB |
+| test corpus (290 memories, 60 days + 1 simulated year) | 46.8 KB | 5.5 KB | 1.0 KB | 14.6 KB | 21.1 KB |
 | `alexa:demo:video` (52 memories, 14 days) | 5.1 KB | 1.8 KB | 1.0 KB | 3.3 KB | 6.1 KB |
-| before this change (`alexa:demo:full`) | 23.7 KB | 5.0 KB | 60.3 KB | ~250 KB | ~308 KB |
+| before the compact index (`alexa:demo:full`) | 23.7 KB | 5.0 KB | 60.3 KB | ~250 KB | ~308 KB |
 
-The index costs about 60–65 B per memory (an 8-character id, a 64-bit hash, tier/encoding and fidelity numbers, timestamps, and on average four or five pruned edges). Content for these short memories compresses to about 35 B each, so the index is still larger than the content. It is about a third of the raw size, and is now proportional to the number of memories rather than the dominant cost.
+Demo runs vary slightly between runs, because the server clock is real time plus the simulated skips. The index costs about 50–65 B per memory (an 8-character id, a 64-bit hash, tier/encoding and fidelity numbers, timestamps, and on average four or five pruned edges). Content for these short memories compresses to about 35 B each, so the index is still larger than the content. It is about a third of the raw size, and is now proportional to the number of memories rather than the dominant cost.
 
 **Compression report.** Every pass (`sleep`, time-skip, budget enforcement) produces a per-tier report with: target ratio and fidelity floor, before / expected (planned) / after for nodes, raw→stored bytes, ratio, ROUGE-L mean and minimum, char similarity, algorithms used, and moves. It is returned by `sleep`, stored in `memory_stats.lastReport`, and appended to `data/memory/compaction.log` as text plus a JSON line. `compress_preview` (or `GET /api/preview`) is a dry run that writes nothing. It doesn't form new schemas; those are created at the start of a real `sleep`.
 

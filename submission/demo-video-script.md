@@ -50,3 +50,11 @@ Rehearse once with `DEMO_PACE=0 npm run alexa:demo:video` to warm caches. Then r
 
 ## Rendered draft
 `submission/video/demo-v2.mp4` (2:23, 1280×720) is rendered from `narration-v2.txt` with the `en-US-AndrewNeural` voice, using `video/work2/record.py` and `build.sh`. The MP4 is gitignored. Changes from the table above: in shot 4 the question is "What does my daughter love?", the weekly-sync question is skipped in curated mode, and shot 8 ends on the stats panel turning red (content 1.2 KB + dictionary 1.0 KB + index 3.6 KB = 5.8 KB, over the 4.9 KB budget).
+
+## Rendered v3 (animated)
+`submission/video/demo-v3.mp4` (2:22) is rendered from `narration-v3.txt` with `video/work3/record.py` and `build.py`. It has:
+- an animated neural-network title card and end card
+- 0.6 s transitions between shots (fade, slide, circle, radial)
+- captions that slide in
+- the brain view's new animations: glowing activation pulses travel along edges; on sleep, memories drift into their schema clusters, shrink, and a byte counter ticks down with per-tier bars; colour and size changes fade smoothly between tiers
+- shot 5, an animated per-tier chart with ratios counting up, from the 290-memory test corpus (warm 2.9×, cool 5.2×, cold 8.9×; content 47.9 → 5.6 KB, 8.6×)

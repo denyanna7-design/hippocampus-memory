@@ -72,7 +72,11 @@ export class MemoryEngine {
       for (const n of idx.nodes) this.nodes.set(n.id, n); this.edges = idx.edges; this.meta = { ...this.meta, ...idx.meta };
       for (const n of this.nodes.values()) {
         if (n.kind === "schema") n.members = [...this.nodes.values()].filter(m => m.schema === n.id).map(m => m.id);
-        if (!n.vector) { n.vector = localTf(this.text(n.id) + " " + (n.kind === "schema" ? "" : n.tags.join(" "))); n.keywords = Object.keys(topTerms(n.vector, 6)); this.vecSrc.set(n.id, true); }
+        if (!n.vector) {
+          // a damaged blob must not take the whole store down: keep loading, report it as unrecoverable
+          let t = ""; try { t = this.text(n.id); } catch (err) { this.log(`[memory] cannot read ${n.id}: ${(err as Error).message}`); }
+          n.vector = localTf(t + " " + (n.kind === "schema" ? "" : n.tags.join(" "))); n.keywords = Object.keys(topTerms(n.vector, 6)); this.vecSrc.set(n.id, true);
+        }
       }
     }
     else if (existsSync(join(this.dir, "nodes"))) { // migrate legacy per-node JSON index
@@ -241,7 +245,7 @@ export class MemoryEngine {
   }
   private rowsFromDisk(): Row[] {
     const refs = new Map<string, number>(); for (const n of this.nodes.values()) if (n.enc.enc === "chunks") for (const h of n.enc.chunks) refs.set(h, (refs.get(h) ?? 0) + 1);
-    const pks = Object.fromEntries((["cool", "cold"] as const).map(k => { const pack = this.store.pack(k); return [k, { size: this.store.packSize(k), total: Object.values(pack.entries).reduce((a, b) => a + b.length, 0), entries: pack.entries }]; }));
+    const pks = Object.fromEntries((["cool", "cold"] as const).map(k => { let pack: { entries: Record<string, Buffer> }; try { pack = this.store.pack(k); } catch { pack = { entries: {} }; } return [k, { size: this.store.packSize(k), total: Object.values(pack.entries).reduce((a, b) => a + b.length, 0), entries: pack.entries }]; }));
     return [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, rawBytes: n.rawBytes, cost: this.diskCost(n, refs, pks), fid: n.fid.rouge, cfid: n.fid.char, alg: algOf(n.enc), schema: n.lossy || n.enc.enc === "resid" || (n.enc.enc === "pack" && n.enc.inner === "resid") ? n.schema : undefined, kind: n.kind }));
   }
   private aggregate(rows: Row[]) {
@@ -429,15 +433,17 @@ export class MemoryEngine {
       memories: eps.length, schemas: this.nodes.size - eps.length, edges: this.edges.size,
       tiers: TIERS.map((t, i) => ({ tier: t.name, target: `${t.target[0]}–${t.target[1]}x`, floor: t.floor, ...a.tiers[i] })),
       rawBytes: a.raw, storedBytes: a.stored, compressionRatio: ratio(a.raw, a.stored), schemaBytes: a.schemaStored,
-      lossyMemories: eps.filter(n => n.lossy).length, minFidelity: round(Math.min(1, ...eps.map(n => n.fid.rouge))), unrecoverable: 0,
+      lossyMemories: eps.filter(n => n.lossy).length, minFidelity: round(Math.min(1, ...eps.map(n => n.fid.rouge))), unrecoverable: this.verify().length,
       ...this.footprint(), budgetBytes: Number.isFinite(this.budgetBytes) ? this.budgetBytes : null, overBudget: !!this.meta.alert, alert: this.meta.alert,
       dictionary: this.meta.dict, lastReport: this.meta.lastReport ? { at: this.meta.lastReport.at, totals: this.meta.lastReport.totals, moves: this.meta.lastReport.moves } : null,
       meanRetention: eps.length ? round(eps.reduce((s, n) => s + retention(n, now), 0) / eps.length) : 0, embedder: this.embedder.name, summarizer: this.summarizer.name,
     };
   }
+  /** Ids of memories that fail to decode or fail their integrity check (measured, not assumed). */
+  verify(): string[] { const bad: string[] = []; for (const n of this.nodes.values()) { try { this.readRaw(n); } catch { bad.push(n.id); } } return bad; }
   graph() {
     const now = this.now();
-    return { nodes: [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, enc: algOf(n.enc), kind: n.kind === "schema" ? "semantic" : "episodic", lossy: !!n.lossy, label: n.keywords.slice(0, 3).join(" "), retention: round(retention(n, now)), salience: n.salience })),
+    return { nodes: [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, enc: algOf(n.enc), kind: n.kind === "schema" ? "semantic" : "episodic", lossy: !!n.lossy, schema: n.schema ?? null, rawBytes: n.rawBytes, label: n.keywords.slice(0, 3).join(" "), retention: round(retention(n, now)), salience: n.salience })),
       edges: [...this.edges].map(([k, w]) => { const [from, to] = k.split("|"); return { from, to, w: round(w) }; }) };
   }
 }

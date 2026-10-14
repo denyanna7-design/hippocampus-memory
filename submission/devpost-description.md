@@ -36,11 +36,11 @@ Graded storage tiers, re-planned on every sleep:
 | Tier | Fidelity | Target | Measured on a 290-memory, 60-day corpus | How |
 |---|---|---|---|---|
 | hot | lossless | 1–2x | 1.0x | plain / LZ4 |
-| warm | lossless | 2.5–4x | 3.2x | zstd + trained dictionary, delta vs. a similar memory, chunk dedup |
-| cool | ROUGE-L ≥ 0.90 | 5–8x | 5.2–5.4x (mean fidelity 0.93) | schema + residual diff in a shared archive |
-| cold | ROUGE-L ≥ 0.65 | 8–15x | 9.2–9.6x (mean fidelity 0.75) | schema + key residuals, archive packed with brotli/LZMA/zstd |
+| warm | lossless | 2.5–4x | 2.6–2.9x | zstd + trained dictionary, delta vs. a similar memory, chunk dedup |
+| cool | ROUGE-L ≥ 0.90 | 5–8x | 5.0–5.2x (mean fidelity 0.93) | schema + residual diff in a shared archive |
+| cold | ROUGE-L ≥ 0.65 | 8–15x | 7.5–8.9x (mean fidelity 0.75) | schema + key residuals, archive packed with brotli/LZMA/zstd |
 
-Over a simulated year the store shrinks about 9x (47.9 KB → 5.3 KB).
+Over a simulated year, memory content shrinks about 8.6x (47.9 KB → 5.6 KB, 290 memories). Counting the compressed index (15.0 KB) and the trained dictionary (1.0 KB), the whole store is 21.6 KB, about 2.2x smaller than the raw text. With memories this short, the index is now the largest part. Measured with the test corpus: 60 days lived, then sleeps at +7, +30, +90, +180 and +365 days.
 
 Guarantees:
 - nothing is deleted;
@@ -65,7 +65,7 @@ A **simulated Alexa+ client** (allowed by the track rules) drives the server ove
   - hunks ranked by importance (numbers > names > CJK > other words);
   - greedy selection of the fewest hunks that keep ROUGE-L above the tier floor;
   - dropped details fall back to the schema's wording.
-- **Tests:** `node:test`, 11 suites. They cover byte-exact codec round trips, fidelity floors on a realistic corpus, never-unrecoverable, report format, a dry run that writes nothing, budget alerts, and the compact index (size bounds, plus a reload test with byte-exact text and identical recall).
+- **Tests:** `node:test`, 17 tests in two files. They cover byte-exact codec round trips, fidelity floors on a realistic corpus, never-unrecoverable, report format, a dry run that writes nothing, budget alerts, fuzzed round trips (300+ random Unicode texts, empty, 200 KB, lone surrogates) through every tier with reloads, randomized fidelity-floor checks, corruption detection, 60 parallel writes, and the compact index (size bounds, plus a reload test with byte-exact text and identical recall).
 - **Viz:** vis-network with server-sent events.
 
 ## Challenges we ran into
@@ -77,7 +77,7 @@ A **simulated Alexa+ client** (allowed by the track rules) drives the server ove
 ## Accomplishments that we're proud of
 - A memory that is both **brain-like and accountable**: every pass prints target vs. expected vs. actual ratio and measured fidelity.
 - **Never unrecoverable**, enforced by tests and checked against a sha256 on every read.
-- About **9x** storage reduction on a realistic corpus, while important memories stay exact.
+- About **8.6x** smaller memory content on a realistic corpus (2.2x including the index), while important memories stay exact.
 - A reconstruction that behaves like human recall: confident on the gist, honest about faded details, and occasionally blending schema details, which Alexa flags.
 
 ## What we learned

@@ -1,42 +1,98 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Hippocampus · memory graph</title>
 <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
-<style>html,body{height:100%}body{margin:0;background:radial-gradient(circle at 35% 45%,#141b2e,#070a12);color:#cde;font:14px system-ui}#g{position:absolute;inset:0 340px 0 0}
+<style>html,body{height:100%}body{margin:0;background:radial-gradient(circle at 35% 45%,#141b2e,#070a12);color:#cde;font:14px system-ui;overflow:hidden}#g{position:absolute;inset:0 340px 0 0}
 #p{position:absolute;right:0;top:0;bottom:0;width:320px;padding:12px;overflow:auto;background:#0f1522;border-left:1px solid #1f2937}
 h3{margin:4px 0 10px}input,button{background:#1f2937;color:#cde;border:1px solid #374151;border-radius:6px;padding:6px;margin:2px 0;width:100%;box-sizing:border-box}button:hover{background:#273449}
-.row{display:flex;gap:4px}.row>*{flex:1}pre{white-space:pre-wrap;font-size:11.5px;max-height:38vh;overflow:auto;background:#0b1020;border-radius:6px;padding:6px}
-#st{background:#0b1020;border-radius:8px;padding:8px;margin-top:8px;font-size:13px;line-height:1.55;border:1px solid #1f2937;transition:all .4s}#st.over{border-color:#f87171;background:#2a0f14;color:#fecaca}
-#st b{color:#fff}.k{color:#94a3b8}.legend{font-size:12px;color:#94a3b8;margin-top:8px}#cap{position:absolute;left:14px;top:10px;color:#94a3b8;font-size:13px}</style></head>
-<body><div id="g"></div><div id="cap">labels: recalled · schemas ◆ · important memories — hover any dot for details</div><div id="p"><h3>🧠 Hippocampus</h3>
+.row{display:flex;gap:4px}.row>*{flex:1}pre{white-space:pre-wrap;font-size:11.5px;max-height:34vh;overflow:auto;background:#0b1020;border-radius:6px;padding:6px}
+#st{background:#0b1020;border-radius:8px;padding:8px;margin-top:8px;font-size:13px;line-height:1.55;border:1px solid #1f2937;transition:all .6s}#st.over{border-color:#f87171;background:#2a0f14;color:#fecaca;box-shadow:0 0 24px #f8717155;animation:pulse 1.4s infinite}
+@keyframes pulse{50%{box-shadow:0 0 6px #f8717122}}#st b{color:#fff}.k{color:#94a3b8}.legend{font-size:12px;color:#94a3b8;margin-top:8px}#cap{position:absolute;left:14px;top:10px;color:#94a3b8;font-size:13px}
+#tick{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%) scale(.8);margin-left:-170px;opacity:0;pointer-events:none;text-align:center;transition:opacity .4s,transform .4s;
+ background:#070a12cc;border:1px solid #a78bfa66;border-radius:14px;padding:16px 26px;box-shadow:0 0 40px #a78bfa44;backdrop-filter:blur(3px);min-width:400px}#tick.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+#tick .t{font-size:15px;color:#c4b5fd;letter-spacing:.08em;text-transform:uppercase}#tick .n{font:700 40px ui-monospace,monospace;color:#fff;margin:6px 0}#tick .s{font-size:14px;color:#94a3b8}
+#bars{display:flex;gap:18px;justify-content:center;margin-top:26px;margin-bottom:16px;height:70px;align-items:flex-end}#bars div{width:34px;border-radius:4px 4px 0 0;transition:height 1.2s cubic-bezier(.2,.8,.2,1);position:relative}
+#bars em{position:absolute;top:-17px;left:50%;transform:translateX(-50%);font:600 11px ui-monospace,monospace;color:#e5e7eb;font-style:normal}#bars span{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:11px;color:#94a3b8}</style></head>
+<body><div id="g"></div><div id="cap">labels: recalled · schemas ◆ · important memories (hover any dot for details)</div>
+<div id="tick"><div class="t" id="tt">consolidating</div><div class="n" id="tn">0 B</div><div class="s" id="ts"></div><div id="bars"></div></div>
+<div id="p"><h3>🧠 Hippocampus</h3>
 <input id="t" placeholder="remember…"><div class="row"><input id="s" type="number" min="0" max="1" step="0.1" value="0.3" title="salience"><button onclick="post('remember',{text:t.value,salience:+s.value})">remember</button></div>
 <input id="c" placeholder="recall cue…"><button onclick="post('recall',{cue:c.value})">recall</button>
-<div class="row"><button onclick="post('sleep',{})">😴 sleep</button><button onclick="fetch('/api/preview').then(r=>r.text()).then(t=>out.textContent=t)">🔍 preview pass</button></div>
-<button onclick="post('timeskip',{days:7})">⏩ +7 days</button>
+<div class="row"><button onclick="sleepAnim()">😴 sleep</button><button onclick="fetch('/api/preview').then(r=>r.text()).then(t=>out.textContent=t)">🔍 preview pass</button></div>
+<button onclick="skipAnim()">⏩ +7 days</button>
 <div id="st"></div><pre id="out"></pre>
 <div class="legend"><span style="color:#60a5fa">● hot</span> · <span style="color:#a78bfa">● warm (lossless)</span> · <span style="color:#f472b6">● cool (≥0.90)</span> · <span style="color:#6b7280">● cold (≥0.65)</span> · ◆ schema</div></div>
 <script>
-const C=['#60a5fa','#a78bfa','#f472b6','#6b7280'];const nodes=new vis.DataSet(),edges=new vis.DataSet();let lit=new Set(),meta={};
+const C=['#60a5fa','#a78bfa','#f472b6','#6b7280'];const nodes=new vis.DataSet(),edges=new vis.DataSet();let lit=new Set(),meta={},cur={},S={},busy=false;
 const net=new vis.Network(g,{nodes,edges},{layout:{randomSeed:7,improvedLayout:true},
  physics:{solver:'forceAtlas2Based',forceAtlas2Based:{gravitationalConstant:-40,springLength:90,avoidOverlap:.4},stabilization:{iterations:300},maxVelocity:20},
- interaction:{hover:true,tooltipDelay:80},nodes:{font:{color:'#e5e7eb',size:15,strokeWidth:3,strokeColor:'#070a12'},borderWidth:1},edges:{color:{color:'#1e293b',opacity:.7},smooth:false,selectionWidth:0}});
+ interaction:{hover:true,tooltipDelay:80},nodes:{font:{color:'#e5e7eb',size:15,strokeWidth:3,strokeColor:'#070a12'},borderWidth:1,shadow:{enabled:true,color:'rgba(0,0,0,0)',size:0,x:0,y:0}},
+ edges:{color:{color:'#1e293b',opacity:.7},smooth:false,selectionWidth:0}});
 net.once('stabilizationIterationsDone',()=>net.setOptions({physics:{enabled:false}}));
+// ---------- colour / size tweening (tier migration fades, smooth growth/shrink) ----------
+const hex=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16)),mix=(a,b,t)=>'#'+a.map((x,i)=>Math.round(x+(b[i]-x)*t).toString(16).padStart(2,'0')).join('');
+const ease=t=>t<.5?2*t*t:1-(-2*t+2)**2/2;
+function target(n){return {c:C[n.tier],z:(n.kind==='semantic'?12:5)+14*n.retention+(n.salience>=.7?5:0)}}
+let tweens=[];function tween(id,to,ms=1100){const f=cur[id]||to;tweens.push({id,f:{...f},to,t0:performance.now(),ms});cur[id]=to}
+function frame(now){const done=[];const up=[];for(const tw of tweens){const t=Math.min(1,(now-tw.t0)/tw.ms),e=ease(t);
+ if(lit.has(tw.id)){done.push(tw);continue}const c=mix(hex(tw.f.c),hex(tw.to.c),e);up.push({id:tw.id,size:tw.f.z+(tw.to.z-tw.f.z)*e,color:{background:c,border:c}});if(t>=1)done.push(tw)}
+ if(up.length)nodes.update(up);tweens=tweens.filter(x=>!done.includes(x));net.redraw();requestAnimationFrame(frame)}requestAnimationFrame(frame);
 const label=n=>(lit.has(n.id)||n.kind==='semantic'||n.salience>=.7)?n.label:'';
-function style(n){const on=lit.has(n.id);return {id:n.id,label:label(n),title:`${n.label}\n${n.enc}\nretention ${n.retention} · salience ${n.salience}${n.lossy?' · lossy':''}`,
- shape:n.kind==='semantic'?'diamond':'dot',size:(n.kind==='semantic'?12:5)+14*n.retention+(n.salience>=.7?5:0),color:on?{background:'#fde047',border:'#fff'}:{background:C[n.tier],border:C[n.tier]},borderWidth:on?3:1};}
-const kb=b=>b>=1024?(b/1024).toFixed(1)+' KB':b+' B';
-async function refresh(){const d=await (await fetch('/api/graph')).json();d.nodes.forEach(n=>meta[n.id]=n);
- const fresh=!nodes.length;nodes.update(d.nodes.map(style));
- const ids=new Set(d.nodes.map(n=>n.id));nodes.getIds().filter(i=>!ids.has(i)).forEach(i=>nodes.remove(i));
- edges.clear();edges.add(d.edges.filter(e=>e.w>=.1).map(e=>({id:e.from+'|'+e.to,from:e.from,to:e.to,width:.5+3*e.w})));
- if(fresh)net.stabilize(300);
- const S=await (await fetch('/api/stats')).json();st.className=S.overBudget?'over':'';
+const title=n=>`${n.label}\n${n.enc}\nretention ${n.retention} · salience ${n.salience}${n.lossy?' · lossy':''}`;
+const kb=b=>b>=1024?(b/1024).toFixed(1)+' KB':Math.round(b)+' B';
+async function stats(){S=await (await fetch('/api/stats')).json();st.className=S.overBudget?'over':'';
  st.innerHTML=`<b>${S.memories}</b> memories · <b>${S.schemas}</b> schemas<br><span class=k>content</span> <b>${kb(S.storedBytes)}</b> for ${kb(S.rawBytes)} raw (<b>${S.compressionRatio}×</b>)<br>`+
   `<span class=k>index</span> ${kb(S.indexBytes)} · <span class=k>dictionary</span> ${kb(S.dictionaryBytes)}<br><span class=k>total on disk</span> <b>${kb(S.totalBytes)}</b>${S.budgetBytes?` / budget ${kb(S.budgetBytes)}`:''}<br>`+
   `<span class=k>tiers</span> ${S.tiers.map((t,i)=>`<span style="color:${C[i]}">${t.tier} ${t.nodes}</span>`).join(' · ')}<br><span class=k>lossy</span> ${S.lossyMemories} · min fidelity ${S.minFidelity} · <b>unrecoverable ${S.unrecoverable}</b>`+
-  (S.overBudget?'<br>⚠️ <b>OVER BUDGET</b>: nothing deleted, asking the user':'');}
-async function post(p,b){const r=await (await fetch('/api/'+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})).json();out.textContent=r.report??JSON.stringify(r,null,1);refresh();}
-new EventSource('/api/events').onmessage=e=>{const ev=JSON.parse(e.data);if(ev.type!=='recall')return refresh();
- const a=ev.activation;lit=new Set(ev.winners);
- nodes.update(Object.keys(a).filter(id=>meta[id]).map(id=>({id,label:lit.has(id)?meta[id].label:'',color:{background:'#fde047',border:lit.has(id)?'#fff':'#fde047'},borderWidth:lit.has(id)?4:1,opacity:Math.max(.35,a[id])})));
- setTimeout(()=>{refresh()},2500);setTimeout(()=>{lit=new Set();refresh()},9000);};
+  (S.overBudget?'<br>⚠️ <b>OVER BUDGET</b>: nothing deleted, asking the user':'');return S}
+async function refresh(){const d=await (await fetch('/api/graph')).json();const fresh=!nodes.length;
+ const add=[],upd=[];for(const n of d.nodes){meta[n.id]=n;const tg=target(n);
+  if(!nodes.get(n.id)){cur[n.id]={c:tg.c,z:0};add.push({id:n.id,label:label(n),title:title(n),shape:n.kind==='semantic'?'diamond':'dot',size:fresh?tg.z:1,color:tg.c});if(fresh)cur[n.id]=tg;else tween(n.id,tg,900)}
+  else{upd.push({id:n.id,label:label(n),title:title(n),borderWidth:lit.has(n.id)?3:1});if(!lit.has(n.id)&&(cur[n.id]?.c!==tg.c||Math.abs((cur[n.id]?.z??0)-tg.z)>.5))tween(n.id,tg)}}
+ nodes.add(add);nodes.update(upd);const ids=new Set(d.nodes.map(n=>n.id));nodes.getIds().filter(i=>!ids.has(i)).forEach(i=>nodes.remove(i));
+ edges.clear();edges.add(d.edges.filter(e=>e.w>=.1).map(e=>({id:e.from+'|'+e.to,from:e.from,to:e.to,width:.5+3*e.w})));
+ if(fresh)net.stabilize(300);await stats()}
+async function post(p,b){const r=await (await fetch('/api/'+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})).json();out.textContent=r.report??r.text??JSON.stringify(r,null,1);if(!busy)refresh();return r}
+// ---------- spreading-activation pulses along edges ----------
+let pulses=[],flashes=[];
+function nb(id){return net.getConnectedNodes(id)}
+function spread(a,winners){lit=new Set(winners);const t0=performance.now();const act=Object.entries(a).sort((x,y)=>y[1]-x[1]);if(!act.length)return;
+ const seeds=act.filter(([,v])=>v>=.85).map(([k])=>k).slice(0,4);if(!seeds.length)seeds.push(act[0][0]);
+ const when={};seeds.forEach(s=>when[s]=0);let frontier=[...seeds],hop=0;
+ while(frontier.length&&hop<3){const next=[];for(const f of frontier)for(const j of nb(f)){if(a[j]===undefined&&hop>0)continue;if(when[j]!==undefined)continue;when[j]=(hop+1)*650;next.push(j);
+   pulses.push({from:f,to:j,t0:t0+hop*650,ms:650,hot:a[j]!==undefined})}frontier=next.slice(0,40);hop++}
+ for(const[id,t]of Object.entries(when)){setTimeout(()=>{if(!meta[id])return;const on=lit.has(id);flashes.push({id,t0:performance.now()});
+   nodes.update({id,label:on?meta[id].label:'',color:{background:'#fde047',border:on?'#fff':'#fde047'},borderWidth:on?4:1})},t)}
+ setTimeout(()=>{lit=new Set();for(const id in when)if(meta[id]){const tg=target(meta[id]);cur[id]={c:'#fde047',z:cur[id]?.z??tg.z};tween(id,tg,1500)}refresh()},9000)}
+net.on('afterDrawing',ctx=>{const now=performance.now();const pos=net.getPositions();
+ for(const p of pulses){const t=(now-p.t0)/p.ms;if(t<0||t>1)continue;const a=pos[p.from],b=pos[p.to];if(!a||!b)continue;
+  const x=a.x+(b.x-a.x)*ease(t),y=a.y+(b.y-a.y)*ease(t);
+  ctx.save();ctx.strokeStyle=`rgba(253,224,71,${.55*(1-t)})`;ctx.lineWidth=3;ctx.shadowColor='#fde047';ctx.shadowBlur=14;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(x,y);ctx.stroke();
+  const gr=ctx.createRadialGradient(x,y,0,x,y,16);gr.addColorStop(0,'rgba(255,255,220,1)');gr.addColorStop(.35,'rgba(253,224,71,.85)');gr.addColorStop(1,'rgba(253,224,71,0)');
+  ctx.fillStyle=gr;ctx.beginPath();ctx.arc(x,y,16,0,7);ctx.fill();ctx.restore()}
+ pulses=pulses.filter(p=>now-p.t0<p.ms);
+ for(const f of flashes){const t=(now-f.t0)/900;if(t>1)continue;const q=pos[f.id];if(!q)continue;ctx.save();ctx.strokeStyle=`rgba(253,224,71,${1-t})`;ctx.lineWidth=3;ctx.shadowColor='#fde047';ctx.shadowBlur=20;
+  ctx.beginPath();ctx.arc(q.x,q.y,10+40*t,0,7);ctx.stroke();ctx.restore()}
+ flashes=flashes.filter(f=>now-f.t0<900);
+ for(const r of ripples){const t=(now-r.t0)/r.ms;if(t<0||t>1)continue;const q=pos[r.id];if(!q)continue;ctx.save();ctx.strokeStyle=r.c.replace('A',String(.6*(1-t)));ctx.lineWidth=2;ctx.beginPath();ctx.arc(q.x,q.y,r.r0*(1-t)+4,0,7);ctx.stroke();ctx.restore()}
+ ripples=ripples.filter(r=>now-r.t0<r.ms)});
+let ripples=[];
+// ---------- sleep: drift into schema clusters, shrink, byte counter ----------
+function counter(title,from,to,sub,tiersBefore,tiersAfter,ms=2200){tt.textContent=title;tick.className='on';const t0=performance.now();ts.textContent=sub;
+ const maxR=Math.max(2,...(tiersAfter||[]).map(t=>t.ratio||0))*1.1;bars.innerHTML=(tiersAfter||[]).map((t,i)=>`<div style="background:${C[i]};height:4px"><span>${t.tier}</span></div>`).join('');
+ requestAnimationFrame(()=>[...bars.children].forEach((b,i)=>{const r=tiersAfter[i].ratio||0;b.style.height=Math.max(4,70*r/maxR)+'px';b.innerHTML=`<em>${r?r.toFixed(1)+'×':''}</em><span>${tiersAfter[i].tier}</span>`}));
+ (function step(now){const t=Math.min(1,(now-t0)/ms);tn.textContent=kb(from+(to-from)*ease(t));if(t<1)requestAnimationFrame(step)})(t0);
+ setTimeout(()=>{ts.textContent=sub},ms);setTimeout(()=>tick.className='',ms+2600)}
+async function drift(){const pos=net.getPositions();const moves=[];
+ for(const n of Object.values(meta)){if(!n.schema||!pos[n.schema]||!pos[n.id])continue;const s=pos[n.schema],p=pos[n.id];
+  const ang=Math.atan2(p.y-s.y,p.x-s.x),d0=Math.hypot(p.x-s.x,p.y-s.y),r=Math.max(40,Math.min(110,d0*.6));moves.push({id:n.id,a:p,b:{x:s.x+Math.cos(ang)*r,y:s.y+Math.sin(ang)*r}})}
+ const t0=performance.now();await new Promise(res=>{(function step(now){const t=Math.min(1,(now-t0)/1600),e=ease(t);for(const m of moves)net.moveNode(m.id,m.a.x+(m.b.x-m.a.x)*e,m.a.y+(m.b.y-m.a.y)*e);if(t<1)requestAnimationFrame(step);else res()})(t0)})}
+function shrinkAll(){const t0=performance.now();for(const id of nodes.getIds()){const c=cur[id];if(!c)continue;ripples.push({id,t0,ms:900,r0:c.z+14,c:'rgba(196,181,253,A)'});tween(id,{c:c.c,z:Math.max(3,c.z*.55)},600)}}
+async function sleepAnim(){busy=true;const before=await stats();await refresh();await drift();shrinkAll();
+ const r=await post('sleep',{});const after=await (await fetch('/api/stats')).json();
+ counter('sleep · consolidating',before.totalBytes,after.totalBytes,`on disk ${kb(before.totalBytes)} → ${kb(after.totalBytes)} · ${after.schemas} schemas · nothing deleted`,before.tiers,after.tiers);
+ setTimeout(async()=>{busy=false;await refresh()},700)}
+async function skipAnim(){busy=true;const before=await stats();shrinkAll();await post('timeskip',{days:7});const after=await (await fetch('/api/stats')).json();
+ counter('+7 days · decay',before.totalBytes,after.totalBytes,`on disk ${kb(before.totalBytes)} → ${kb(after.totalBytes)} · content ${after.compressionRatio}×`,before.tiers,after.tiers,1800);
+ setTimeout(async()=>{busy=false;await refresh()},500)}
+new EventSource('/api/events').onmessage=e=>{const ev=JSON.parse(e.data);if(ev.type==='recall')return spread(ev.activation,ev.winners);if(!busy)refresh()};
 refresh();
 </script></body></html>

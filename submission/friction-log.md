@@ -44,7 +44,7 @@ Every entry happened during development of this project (Oct 14, 2026). Severity
 - **Expected:** schema + residual plus a strong codec reaches the targets.
 - **Actual:** compressing each memory on its own gave 3.4x cool and 6x cold. Per-object codec overhead (zstd frame headers of about 10 B) dominates 100-byte texts.
 - **Severity:** Medium (design change).
-- **Workaround:** shared tier archives (cool and cold), compact residual encoding (`[pos, del, "ins"]`, no scores stored), and a trained dictionary. Result: cool 5.2–5.4x, cold 9.2–9.6x. Targets re-set from the data and documented.
+- **Workaround:** shared tier archives (cool and cold), compact residual encoding (`[pos, del, "ins"]`, no scores stored), and a trained dictionary. Result (current code, test corpus): cool 5.0–5.2x, cold 7.5–8.9x. Targets re-set from the data and documented.
 - **Suggestion (for MCP memory builders):** publish expected compression ranges for agent-memory-sized texts. Most codec benchmarks use MB-sized corpora.
 
 ### F6: delta-encoding cycle within one pass
