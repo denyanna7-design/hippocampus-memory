@@ -2,9 +2,29 @@
 
 > Node ≥ 22.15 required (zstd). On the box: `export PATH=$HOME/.local/node22/bin:$PATH`.
 
-Agents usually "remember" by stuffing logs into the context window. Hippocampus stores memories as **files**, recalls them by **spreading activation** like a brain, and lets memories **fade without ever losing them**. Decay only lowers how easily a memory is recalled and moves its raw bytes to colder, **losslessly** compressed storage. Every memory can always be recovered byte-for-byte, and each read is checked against its sha256.
+Agents usually "remember" by stuffing logs into the context window. **Hippocampus** is a self-hosted **MCP server (spec 2025-11-25, Streamable HTTP)** that gives Alexa+ a brain-like long-term memory:
 
-Built for the Amazon Developer Hackathon (Alexa+ track). Runs as an MCP server, spec 2025-11-25, over Streamable HTTP. No API keys are needed.
+- memories are **files**, not context;
+- recall is **spreading activation** over an association graph, shaped by Hebbian learning, the spacing effect and salience;
+- **sleep** consolidates similar episodes into **schemas** and compresses faded memories through **graded tiers**: lossless hot/warm, then schema + residual in cool/cold with measured fidelity floors;
+- every pass produces a **compression report**;
+- nothing is ever deleted, and no memory ever becomes unrecoverable;
+- when the storage budget runs out, the server **asks the user** instead of deleting.
+
+Built for the Amazon Developer Hackathon, Alexa+ track. MIT licensed.
+
+## Quick start
+```bash
+# Node >= 22.15 is required for zstd (see .nvmrc). On the dev box: export PATH=$HOME/.local/node22/bin:$PATH
+npm install
+npm start                    # MCP: http://localhost:3000/mcp · brain view: http://localhost:3000/
+npm run alexa:demo:full      # in a 2nd terminal: simulated Alexa+ conversations across sessions (MCP client)
+npm run alexa:demo -- --chat # interactive simulated Alexa+ (/sleep, /skip 30, /stats, /quit)
+npm test && npm run typecheck
+```
+Docker: `docker build -t hippocampus . && docker run -p 3000:3000 -v $PWD/data:/data hippocampus`
+
+**Runtime use of MCP.** `src/server.ts` imports `@modelcontextprotocol/sdk` (`McpServer`, `StreamableHTTPServerTransport`) and serves 6 tools at `POST /mcp`. `src/alexa-sim.ts` imports the SDK `Client` and `StreamableHTTPClientTransport` and calls those tools. Each simulated Alexa+ turn opens a fresh MCP session, so continuity can only come from the memory server.
 
 ## Architecture
 ```
@@ -82,11 +102,5 @@ Demo REST helpers (not part of MCP):
 - `POST /api/timeskip {days}`: shifts the server clock and runs decay
 - `GET /api/graph`, `/api/stats`, `/api/events`
 
-## Demo script (under 3 minutes)
-1. Open `http://localhost:3000/`. The graph is empty.
-2. Remember: "My daughter Mia loves strawberries" (salience 0.8), "Strawberries are on sale at the farmers market Saturday", "Farmers market opens 8am by the river", "Lunch was a forgettable sandwich" (salience 0).
-3. Recall "What does Mia like?". The nodes light up yellow: Mia is matched by the cue, and the market is reached by spreading activation. Point out that only above-threshold memories come back.
-4. Click **sleep**, then **+7 days** several times. Watch the colours move hot→warm→cool→cold, with each node labelled by its algorithm (delta, brotli-11, pack). The sandwich fades first, the salient memory lasts, and the stats panel shows per-tier ratios.
-5. Recall the faded memory. It comes back **word for word** from the cold archive and warms up again.
-6. Restart with `MEMORY_BUDGET_BYTES=900`. The stats panel turns red and Alexa reads out the alert: nothing was deleted, and the user has to decide.
-7. Show the same thing through Alexa+ or an MCP client (`npm run smoke`).
+## Demo
+The full shot list is in `submission/demo-video-script.md`. Short version: run `npm start`, open `http://localhost:3000/`, run `npm run alexa:demo:full` in a second terminal and watch the graph light up, click 🔍 preview pass / 😴 sleep / ⏩ +7 days, then restart with `MEMORY_BUDGET_BYTES=9000` to show the alert.

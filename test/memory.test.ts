@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { MemoryEngine, retention, tierFor, DAY, Tier, TIERS, SALIENT } from "../src/memory/engine.js";
 import { CODECS, hasZstd, trainDictionary, versions } from "../src/memory/codecs.js";
 import { plan, apply, diff, rougeL, xtok } from "../src/memory/residual.js";
-import { corpus } from "./corpus.js";
+import { corpus } from "../src/demo-corpus.js";
 
 function mk(o: { budgetBytes?: number; log?: (m: string) => void } = {}) {
   let t = Date.UTC(2026, 9, 1);

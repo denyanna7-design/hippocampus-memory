@@ -39,6 +39,17 @@ function buildServer() {
 
 const app = express();
 app.use(express.json());
+// Optional auth for public deployments: MCP_API_KEY requires "Authorization: Bearer <key>".
+app.use("/mcp", (req, res, next) => {
+  const key = process.env.MCP_API_KEY;
+  if (key && req.headers.authorization !== `Bearer ${key}`) { res.status(401).json({ error: "unauthorized" }); return; }
+  next();
+});
+// DEMO_ROUTES=0 disables the demo-only REST writes (remember/recall/sleep/timeskip) and the brain view.
+app.use((req, res, next) => {
+  if (process.env.DEMO_ROUTES === "0" && (req.path.startsWith("/api/") || req.path === "/" || req.path.endsWith(".html"))) { res.status(404).end(); return; }
+  next();
+});
 app.post("/mcp", async (req, res) => {
   const server = buildServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

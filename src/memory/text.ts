@@ -19,7 +19,7 @@ export function tokenize(text: string): string[] {
 }
 
 function stem(w: string): string {
-  if (w.length > 5 && w.endsWith("ing")) return w.slice(0, -3);
+  if (w.length > 5 && w.endsWith("ing")) { const b = w.slice(0, -3); return /([^aeiouls])\1$/.test(b) ? b.slice(0, -1) : b; }
   if (w.length > 4 && w.endsWith("ed")) return w.slice(0, -2);
   if (w.length > 4 && w.endsWith("ies")) return w.slice(0, -3) + "y";
   if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);

@@ -1,18 +1,20 @@
 {
   "name": "amazon-hackathon",
   "version": "1.0.0",
-  "description": "",
+  "description": "Hippocampus: brain-inspired memory MCP server for Alexa+ (activation recall, sleep consolidation, graded compression)",
   "main": "index.js",
   "scripts": {
     "test": "tsx --test test/*.test.ts",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx src/client-test.ts"
+    "smoke": "tsx src/client-test.ts",
+    "alexa:demo": "tsx src/alexa-sim.ts",
+    "alexa:demo:full": "tsx src/alexa-sim.ts --with-history"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "express": "^5.3.0",

@@ -2,7 +2,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 const client = new Client({ name: "smoke-test", version: "0.1.0" });
-const transport = new StreamableHTTPClientTransport(new URL(process.env.MCP_URL ?? "http://localhost:3000/mcp"));
+const transport = new StreamableHTTPClientTransport(new URL(process.env.MCP_URL ?? "http://localhost:3000/mcp"), process.env.MCP_API_KEY ? { requestInit: { headers: { authorization: `Bearer ${process.env.MCP_API_KEY}` } } } : undefined);
 await client.connect(transport);
 console.log("protocol:", transport.protocolVersion);
 console.log("tools:", (await client.listTools()).tools.map(t => t.name));

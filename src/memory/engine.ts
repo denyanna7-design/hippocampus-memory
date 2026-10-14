@@ -130,9 +130,10 @@ export class MemoryEngine {
     for (let h = 0; h < P.hops; h++) {
       const next = new Map<string, number>();
       for (const [i, a] of frontier) for (const [j, w] of this.neighbors(i)) { if (this.nodes.get(j)?.kind !== "episodic") continue; const add = a * w * P.hopDecay; if (add >= 0.01) next.set(j, (next.get(j) ?? 0) + add); }
-      for (const [j, add] of next) { act.set(j, Math.min(1, (act.get(j) ?? 0) + add)); if (!via.has(j)) via.set(j, "spread"); }
+      for (const [j, add] of next) { act.set(j, (act.get(j) ?? 0) + add); if (!via.has(j)) via.set(j, "spread"); }
       frontier = next;
     }
+    const top = Math.max(1, ...act.values()); for (const [i, a] of act) act.set(i, a / top); // keep ranking, scale to ≤1
     const winners = [...act].filter(([, a]) => a >= P.threshold).sort((a, b) => b[1] - a[1]).slice(0, k);
     this.emit({ type: "recall", cue, activation: Object.fromEntries(act), winners: winners.map(w => w[0]) });
     const hits: RecallHit[] = []; const warm: Record<string, Tier> = {};
