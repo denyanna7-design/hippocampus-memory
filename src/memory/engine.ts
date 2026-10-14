@@ -3,13 +3,15 @@
 //  Storage: graded tiers chosen by retention R. hot/warm are lossless; cool/cold store a memory as
 //  schema (prototype) + importance-ordered residual diffs and may drop low-importance residual details,
 //  but never below a measured fidelity floor, never for high-salience memories, and never deleting anything.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, statSync, appendFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync, statSync, appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { cosine, topTerms } from "./text.js";
+import { cosine, topTerms, termFreq } from "./text.js";
+const localTf = (t: string) => { const tf = termFreq(t); for (const k in tf) tf[k] = 1 + Math.log(tf[k]); return tf; };
 import { Embedder, Summarizer, localEmbedder, extractiveSummarizer } from "./providers.js";
 import { RawStore, Enc, sha, chunk, fileOf } from "./rawstore.js";
 import { codec, codecsFor, trainDictionary, dictId, Codec } from "./codecs.js";
+import { readIndex, writeIndex, HASH_HEX, sparsify } from "./index-file.js";
 import { plan as residPlan, apply, Hunk, rougeL, charSim, packHunks, unpackHunks } from "./residual.js";
 
 export type Tier = 0 | 1 | 2 | 3;
@@ -64,15 +66,34 @@ export class MemoryEngine {
   constructor(o: EngineOpts) {
     this.dir = o.dir; this.now = o.now ?? Date.now; this.embedder = o.embedder ?? localEmbedder; this.summarizer = o.summarizer ?? extractiveSummarizer;
     this.budgetBytes = o.budgetBytes ?? Number(process.env.MEMORY_BUDGET_BYTES ?? Infinity); this.log = o.log ?? (m => console.warn(m));
-    mkdirSync(join(this.dir, "nodes"), { recursive: true }); this.store = new RawStore(this.dir);
-    for (const f of readdirSync(join(this.dir, "nodes"))) if (f.endsWith(".json")) { const n = JSON.parse(readFileSync(join(this.dir, "nodes", f), "utf8")) as MemoryNode; this.nodes.set(n.id, n); }
-    const ef = join(this.dir, "edges.json"); if (existsSync(ef)) this.edges = new Map(Object.entries(JSON.parse(readFileSync(ef, "utf8"))));
-    const mf = join(this.dir, "meta.json"); if (existsSync(mf)) this.meta = { ...this.meta, ...JSON.parse(readFileSync(mf, "utf8")) };
+    mkdirSync(this.dir, { recursive: true }); this.store = new RawStore(this.dir);
+    const idx = readIndex(join(this.dir, "index.bin"));
+    if (idx) {
+      for (const n of idx.nodes) this.nodes.set(n.id, n); this.edges = idx.edges; this.meta = { ...this.meta, ...idx.meta };
+      for (const n of this.nodes.values()) {
+        if (n.kind === "schema") n.members = [...this.nodes.values()].filter(m => m.schema === n.id).map(m => m.id);
+        if (!n.vector) { n.vector = localTf(this.text(n.id) + " " + (n.kind === "schema" ? "" : n.tags.join(" "))); n.keywords = Object.keys(topTerms(n.vector, 6)); this.vecSrc.set(n.id, true); }
+      }
+    }
+    else if (existsSync(join(this.dir, "nodes"))) { // migrate legacy per-node JSON index
+      for (const f of readdirSync(join(this.dir, "nodes"))) if (f.endsWith(".json")) { const n = JSON.parse(readFileSync(join(this.dir, "nodes", f), "utf8")) as MemoryNode; this.nodes.set(n.id, n); }
+      const ef = join(this.dir, "edges.json"); if (existsSync(ef)) this.edges = new Map(Object.entries(JSON.parse(readFileSync(ef, "utf8"))));
+      const mf = join(this.dir, "meta.json"); if (existsSync(mf)) this.meta = { ...this.meta, ...JSON.parse(readFileSync(mf, "utf8")) };
+      this.flush(); for (const x of ["nodes", "edges.json", "meta.json"]) rmSync(join(this.dir, x), { recursive: true, force: true });
+    }
   }
   on(l: Listener) { this.listeners.push(l); return () => { this.listeners = this.listeners.filter(x => x !== l); }; }
   private emit(ev: { type: string; [k: string]: unknown }) { for (const l of this.listeners) l(ev); }
-  private saveNode(n: MemoryNode) { writeFileSync(join(this.dir, "nodes", `${n.id}.json`), JSON.stringify(n)); }
-  private saveMeta() { writeFileSync(join(this.dir, "edges.json"), JSON.stringify(Object.fromEntries(this.edges))); writeFileSync(join(this.dir, "meta.json"), JSON.stringify(this.meta)); }
+  private dirty = false; private vecSrc = new Map<string, boolean>(); // id → vector derivable from stored text
+  /** Index writes are coalesced: everything changed in one tick is written once, compressed, atomically. */
+  private saveNode(_n?: MemoryNode) { if (!this.dirty) { this.dirty = true; queueMicrotask(() => this.flush()); } }
+  private saveMeta() { this.saveNode(); }
+  flush() {
+    this.dirty = false; const lr = this.meta.lastReport;
+    // lossless memories with the default local embedder: the vector is a pure function of the text, so it is not stored
+    const derivable = (n: MemoryNode) => this.embedder.name === "local-tf" && this.vecSrc.get(n.id) === true;
+    writeIndex(join(this.dir, "index.bin"), this.nodes, this.edges, { ...this.meta, lastReport: lr ? { at: lr.at, totals: lr.totals, moves: lr.moves } : null }, derivable);
+  }
   private key(a: string, b: string) { return a < b ? `${a}|${b}` : `${b}|${a}`; }
   weight(a: string, b: string) { return this.edges.get(this.key(a, b)) ?? 0; }
   setWeight(a: string, b: string, w: number) { if (a !== b) this.edges.set(this.key(a, b), Math.min(1, Math.max(0, w))); }
@@ -97,7 +118,7 @@ export class MemoryEngine {
         b = e.inner === "raw" ? v : Buffer.from(apply(this.text(e.schema!), unpackHunks(v).slice(0, e.keep)));
       }
     }
-    if (sha(b) !== (n.lossy ? n.reconSha : n.sha256)) throw new Error(`integrity check failed for ${n.id}`);
+    if (!sha(b).startsWith((n.lossy ? n.reconSha : n.sha256)!.slice(0, HASH_HEX))) throw new Error(`integrity check failed for ${n.id}`);
     return b;
   }
   text(id: string) { return this.readRaw(this.nodes.get(id)!).toString("utf8"); }
@@ -117,6 +138,7 @@ export class MemoryEngine {
     const vector = await this.embedder.embed(text + " " + tags.join(" "));
     const n: MemoryNode = { id: randomUUID().slice(0, 8), kind, tier: 0, enc: { enc: "plain" }, sha256: sha(raw), rawBytes: raw.length, fid: { rouge: 1, char: 1 },
       keywords: Object.keys(topTerms(vector, 6)), vector, salience: s, stability: P.baseStability * (1 + 3 * s), createdAt: now, lastAccess: now, accessCount: 0, tags };
+    this.vecSrc.set(n.id, JSON.stringify(localTf(text + " " + tags.join(" "))) === JSON.stringify(vector));
     this.store.writeFile(`${n.id}.txt`, raw); this.nodes.set(n.id, n); this.saveNode(n); return n;
   }
 
@@ -140,7 +162,7 @@ export class MemoryEngine {
     for (const [id, a] of winners) {
       const n = this.nodes.get(id)!; const r = retention(n, now);
       n.stability += n.stability * P.spacingGain * (1 - r) * (1 + n.salience) * a + 0.1; n.lastAccess = now; n.accessCount++;
-      hits.push({ id, activation: round(a), tier: n.tier, storage: `${TIER_NAMES[n.tier]}/${algOf(n.enc)}`, exact: !n.lossy, fidelity: round(n.fid.rouge), retention: round(r), text: this.text(id), summary: n.summary, via: via.get(id)! });
+      hits.push({ id, activation: round(a), tier: n.tier, storage: `${TIER_NAMES[n.tier]}/${algOf(n.enc)}`, exact: !n.lossy, fidelity: round(n.fid.rouge), retention: round(r), text: this.text(id), summary: n.summary ?? (n.rawBytes > 160 ? this.summarySync(n) : undefined), via: via.get(id)! });
       if (!n.lossy && n.tier > 1) warm[id] = 1; // reconsolidation: lossless memories warm up
       this.saveNode(n);
     }
@@ -252,6 +274,7 @@ export class MemoryEngine {
       const medoid = cl.map(c => ({ c, s: cl.reduce((acc, d) => acc + cosine(c.vector, d.vector), 0) })).sort((x, y) => y.s - x.s)[0].c;
       const sraw = this.readRaw(medoid);
       const s: MemoryNode = { ...structuredClone(medoid), id: randomUUID().slice(0, 8), kind: "schema", pinned: true, members: cl.map(c => c.id), tier: 0, enc: { enc: "plain" }, schema: undefined, tags: ["schema"], salience: 1 };
+      this.vecSrc.set(s.id, JSON.stringify(localTf(sraw.toString("utf8") + " ")) === JSON.stringify(s.vector));
       this.store.writeFile(`${s.id}.txt`, sraw); this.nodes.set(s.id, s); this.saveNode(s); created++;
       for (const c of cl) { c.schema = s.id; this.saveNode(c); this.setWeight(s.id, c.id, 0.8); }
       schemas.push(s);
@@ -260,29 +283,33 @@ export class MemoryEngine {
   }
   private trainDict() {
     const samples = this.episodes().filter(n => !n.lossy).map(n => this.text(n.id));
-    const d = trainDictionary(samples); if (!d) return;
+    const rawTotal = samples.reduce((a, t) => a + Buffer.byteLength(t), 0);
+    const d = trainDictionary(samples, Math.min(16384, Math.max(1024, Math.round(rawTotal / 6)))); if (!d) return;
     const id = dictId(d); this.store.writeDict(id, d); this.meta.dict = id;
   }
   private desiredTier(n: MemoryNode, now: number): Tier { return n.kind === "schema" ? 1 : tierFor(retention(n, now)); }
 
   /** One compression pass. `dryRun` returns the expected report without writing anything. */
-  async pass(opts: { dryRun?: boolean; force?: Record<string, Tier>; quiet?: boolean; schemasCreated?: number } = {}): Promise<PassReport> {
-    const now = this.now(); const before = this.aggregate(this.rowsFromDisk());
+  async pass(opts: { dryRun?: boolean; force?: Record<string, Tier>; quiet?: boolean; schemasCreated?: number; recode?: boolean } = {}): Promise<PassReport> {
+    const now = this.now();
+    const staleDict = (n: MemoryNode) => !n.lossy && (n.enc.enc === "z" || n.enc.enc === "resid") && !!n.enc.dict && n.enc.dict !== this.meta.dict; // re-encode so old dictionaries can be retired
+    const before = this.aggregate(this.rowsFromDisk());
     const moving: [MemoryNode, Tier][] = [];
     for (const n of this.nodes.values()) {
       const want = opts.force?.[n.id] ?? this.desiredTier(n, now);
-      if (want === n.tier) continue;
+      if (want === n.tier && !(opts.recode && staleDict(n))) continue;
       if (want < n.tier && (n.lossy || opts.force?.[n.id] === undefined)) continue; // decay only goes colder; lossy never warms
       moving.push([n, want]);
     }
-    const moves: Record<string, number> = {}; for (const [n, t] of moving) { const k = `${TIER_NAMES[n.tier]}→${TIER_NAMES[t]}`; moves[k] = (moves[k] ?? 0) + 1; }
+    const moves: Record<string, number> = {}; for (const [n, t] of moving) { const k = n.tier === t ? `recode(${TIER_NAMES[t]})` : `${TIER_NAMES[n.tier]}→${TIER_NAMES[t]}`; moves[k] = (moves[k] ?? 0) + 1; }
     this.plannedDelta.clear(); this.plannedBase.clear();
     const plans = moving.map(([n, t]) => { const p = this.planNode(n, t); if (p.enc.enc === "delta") { this.plannedDelta.add(n.id); this.plannedBase.add(p.enc.base); } return p; });
     // shared tier archives (cool, cold): rebuilt whenever a memory enters or leaves them
     const finalTier = (n: MemoryNode) => plans.find(p => p.id === n.id)?.tier ?? n.tier;
     const packOuts: PackOut[] = [];
     for (const [pk, t] of [["cool", 2], ["cold", 3]] as const) {
-      if (!(plans.some(p => p.tier === t) || moving.some(([n]) => n.tier === t))) continue;
+      const stalePack = opts.recode && !!this.store.pack(pk).dict && this.store.pack(pk).dict !== this.meta.dict;
+      if (!(plans.some(p => p.tier === t) || moving.some(([n]) => n.tier === t) || stalePack)) continue;
       const old = this.store.pack(pk).entries; const entries: Record<string, Buffer> = {};
       for (const n of this.nodes.values()) if (finalTier(n) === t) entries[n.id] = plans.find(p => p.id === n.id)?.payload ?? old[n.id];
       const body = this.store.packBody(entries); const dict = this.meta.dict; const cands: { c: string; dict: string | null; d: Buffer }[] = [];
@@ -330,12 +357,14 @@ export class MemoryEngine {
       const n = this.nodes.get(p.id)!;
       n.enc = p.enc.enc === "pack" ? { ...p.enc, codec: packOuts.find(o => o.tier === p.tier)!.codec } : p.enc;
       n.tier = p.tier; n.lossy = p.lossy; n.fid = p.fid; if (p.keeps) n.keeps = p.keeps; n.reconSha = p.lossy ? sha(p.recon!) : undefined;
+      // a faded memory is cued by what is left of it: re-derive its vector from the reconstruction (not stored in the index)
+      if (p.lossy && this.embedder.name === "local-tf") { n.vector = localTf(p.recon!.toString("utf8") + " " + n.tags.join(" ")); n.keywords = Object.keys(topTerms(n.vector, 6)); this.vecSrc.set(n.id, true); }
     }
     for (const n of this.nodes.values()) { const e = n.enc; if (e.enc !== "pack") continue; const o = packOuts.find(x => x.pack === (e.pack ?? "cold")); if (o) n.enc = { ...e, codec: o.codec }; }
     for (const p of plans) {                                     // 4) verify every moved memory, then drop superseded blobs
       const n = this.nodes.get(p.id)!; const prev = old.get(p.id)!;
       this.readRaw(n); // throws if anything is off
-      if (!n.summary && p.tier >= 1) n.summary = this.summarySync(n);
+      if (!n.summary && p.tier >= 1 && n.rawBytes > 160) n.summary = this.summarySync(n);
       if (fileOf(n.id, prev) !== fileOf(n.id, n.enc)) this.store.drop(n.id, prev);
       this.saveNode(n); this.emit({ type: "tier", id: n.id, to: p.tier, enc: n.enc.enc });
     }
@@ -352,12 +381,20 @@ export class MemoryEngine {
     const created = this.formSchemas(); this.trainDict();
     for (const [k, w] of this.edges) this.edges.set(k, Math.max(0.05, w * 0.95));
     this.meta.lastSleep = this.now();
-    return this.pass({ schemasCreated: created });
+    // synaptic pruning: weak associations beyond each node's strongest few are forgotten (memories themselves never are)
+    const keep = new Set(sparsify(this.edges).map(e => e[0])); for (const k of [...this.edges.keys()]) if (!keep.has(k)) this.edges.delete(k);
+    return this.pass({ schemasCreated: created, recode: true });
   }
 
   // ================= budget =================
-  totalBytes() { return this.store.dirBytes("raw") + this.store.dirBytes("chunks") + this.store.dirBytes("packs") + this.store.dirBytes("dicts") + this.store.dirBytes("nodes")
-    + ["edges.json", "meta.json"].reduce((a, f) => a + (existsSync(join(this.dir, f)) ? statSync(join(this.dir, f)).size : 0), 0); }
+  /** On-disk footprint split into memory content, shared zstd dictionaries, and the (compressed) index. */
+  footprint() {
+    if (this.dirty) this.flush();
+    const content = this.store.dirBytes("raw") + this.store.dirBytes("chunks") + this.store.dirBytes("packs");
+    const dictionaries = this.store.dirBytes("dicts"); const f = join(this.dir, "index.bin"); const index = existsSync(f) ? statSync(f).size : 0;
+    return { contentBytes: content, dictionaryBytes: dictionaries, indexBytes: index, totalBytes: content + dictionaries + index };
+  }
+  totalBytes() { return this.footprint().totalBytes; }
   async enforceBudget(inPass = false): Promise<BudgetAlert | null> {
     if (!Number.isFinite(this.budgetBytes)) return null;
     if (!inPass && this.totalBytes() > this.budgetBytes) {
@@ -372,7 +409,7 @@ export class MemoryEngine {
     const total = this.totalBytes();
     if (total > this.budgetBytes) {
       const alert: BudgetAlert = { level: "over_budget", totalBytes: total, budgetBytes: this.budgetBytes, at: this.now(),
-        message: `Memory store is ${total} B, over the ${this.budgetBytes} B budget, and every memory is already in its deepest allowed tier (fidelity floors and high-salience memories are protected). Nothing was deleted. Please decide: raise MEMORY_BUDGET_BYTES, export/archive memories elsewhere, or explicitly approve deleting specific memories.` };
+        message: `Memory store is ${total} B (${(() => { const f = this.footprint(); return `content ${f.contentBytes} B + dictionaries ${f.dictionaryBytes} B + index ${f.indexBytes} B`; })()}), over the ${this.budgetBytes} B budget, and every memory is already in its deepest allowed tier (fidelity floors and high-salience memories are protected). Nothing was deleted. Please decide: raise MEMORY_BUDGET_BYTES, export/archive memories elsewhere, or explicitly approve deleting specific memories.` };
       if (!this.meta.alert) this.log(`[memory] ALERT ${alert.message}`);
       this.meta.alert = alert; this.emit({ type: "alert", alert });
     } else this.meta.alert = null;
@@ -393,7 +430,7 @@ export class MemoryEngine {
       tiers: TIERS.map((t, i) => ({ tier: t.name, target: `${t.target[0]}–${t.target[1]}x`, floor: t.floor, ...a.tiers[i] })),
       rawBytes: a.raw, storedBytes: a.stored, compressionRatio: ratio(a.raw, a.stored), schemaBytes: a.schemaStored,
       lossyMemories: eps.filter(n => n.lossy).length, minFidelity: round(Math.min(1, ...eps.map(n => n.fid.rouge))), unrecoverable: 0,
-      totalBytes: this.totalBytes(), budgetBytes: Number.isFinite(this.budgetBytes) ? this.budgetBytes : null, overBudget: !!this.meta.alert, alert: this.meta.alert,
+      ...this.footprint(), budgetBytes: Number.isFinite(this.budgetBytes) ? this.budgetBytes : null, overBudget: !!this.meta.alert, alert: this.meta.alert,
       dictionary: this.meta.dict, lastReport: this.meta.lastReport ? { at: this.meta.lastReport.at, totals: this.meta.lastReport.totals, moves: this.meta.lastReport.moves } : null,
       meanRetention: eps.length ? round(eps.reduce((s, n) => s + retention(n, now), 0) / eps.length) : 0, embedder: this.embedder.name, summarizer: this.summarizer.name,
     };

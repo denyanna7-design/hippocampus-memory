@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "smoke": "tsx src/client-test.ts",
     "alexa:demo": "tsx src/alexa-sim.ts",
-    "alexa:demo:full": "tsx src/alexa-sim.ts --with-history"
+    "alexa:demo:full": "tsx src/alexa-sim.ts --with-history",
+    "alexa:demo:video": "tsx src/alexa-sim.ts --curated"
   },
   "keywords": [],
   "author": "",

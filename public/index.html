@@ -1,25 +1,42 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Hippocampus · memory graph</title>
 <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
-<style>body{margin:0;background:#0b0f1a;color:#cde;font:14px system-ui}#g{position:absolute;inset:0 340px 0 0}#p{position:absolute;right:0;top:0;bottom:0;width:320px;padding:10px;overflow:auto;background:#111827}
-input,button{background:#1f2937;color:#cde;border:1px solid #374151;padding:6px;margin:2px 0;width:100%;box-sizing:border-box}pre{white-space:pre-wrap;font-size:12px}</style></head>
-<body><div id="g"></div><div id="p"><h3>🧠 Hippocampus</h3>
-<input id="t" placeholder="remember…"><button onclick="post('remember',{text:t.value,salience:+s.value})">remember</button>
-<input id="s" type="number" min="0" max="1" step="0.1" value="0.3" title="salience">
+<style>html,body{height:100%}body{margin:0;background:radial-gradient(circle at 35% 45%,#141b2e,#070a12);color:#cde;font:14px system-ui}#g{position:absolute;inset:0 340px 0 0}
+#p{position:absolute;right:0;top:0;bottom:0;width:320px;padding:12px;overflow:auto;background:#0f1522;border-left:1px solid #1f2937}
+h3{margin:4px 0 10px}input,button{background:#1f2937;color:#cde;border:1px solid #374151;border-radius:6px;padding:6px;margin:2px 0;width:100%;box-sizing:border-box}button:hover{background:#273449}
+.row{display:flex;gap:4px}.row>*{flex:1}pre{white-space:pre-wrap;font-size:11.5px;max-height:38vh;overflow:auto;background:#0b1020;border-radius:6px;padding:6px}
+#st{background:#0b1020;border-radius:8px;padding:8px;margin-top:8px;font-size:13px;line-height:1.55;border:1px solid #1f2937;transition:all .4s}#st.over{border-color:#f87171;background:#2a0f14;color:#fecaca}
+#st b{color:#fff}.k{color:#94a3b8}.legend{font-size:12px;color:#94a3b8;margin-top:8px}#cap{position:absolute;left:14px;top:10px;color:#94a3b8;font-size:13px}</style></head>
+<body><div id="g"></div><div id="cap">labels: recalled · schemas ◆ · important memories — hover any dot for details</div><div id="p"><h3>🧠 Hippocampus</h3>
+<input id="t" placeholder="remember…"><div class="row"><input id="s" type="number" min="0" max="1" step="0.1" value="0.3" title="salience"><button onclick="post('remember',{text:t.value,salience:+s.value})">remember</button></div>
 <input id="c" placeholder="recall cue…"><button onclick="post('recall',{cue:c.value})">recall</button>
-<button onclick="post('sleep',{})">😴 sleep</button><button onclick="fetch('/api/preview').then(r=>r.text()).then(t=>out.textContent=t)">🔍 preview pass</button><button onclick="post('timeskip',{days:7})">⏩ +7 days</button>
-<pre id="st"></pre><pre id="out"></pre>
-<p>Tier colours: <span style="color:#60a5fa">hot (plain/LZ4)</span> · <span style="color:#a78bfa">warm (zstd+dict, lossless)</span> · <span style="color:#f472b6">cool (schema+residual ≥0.90)</span> · <span style="color:#6b7280">cold (gist+key residuals ≥0.65)</span> · ◆ semantic</p></div>
+<div class="row"><button onclick="post('sleep',{})">😴 sleep</button><button onclick="fetch('/api/preview').then(r=>r.text()).then(t=>out.textContent=t)">🔍 preview pass</button></div>
+<button onclick="post('timeskip',{days:7})">⏩ +7 days</button>
+<div id="st"></div><pre id="out"></pre>
+<div class="legend"><span style="color:#60a5fa">● hot</span> · <span style="color:#a78bfa">● warm (lossless)</span> · <span style="color:#f472b6">● cool (≥0.90)</span> · <span style="color:#6b7280">● cold (≥0.65)</span> · ◆ schema</div></div>
 <script>
-const C=['#60a5fa','#a78bfa','#f472b6','#6b7280'];const nodes=new vis.DataSet(),edges=new vis.DataSet();
-const net=new vis.Network(g,{nodes,edges},{physics:{stabilization:false},nodes:{font:{color:'#cde'}},edges:{color:'#334155'}});
-async function refresh(){const d=await (await fetch('/api/graph')).json();
- nodes.update(d.nodes.map(n=>({id:n.id,label:n.label+'\n'+n.enc,shape:n.kind==='semantic'?'diamond':'dot',size:8+20*n.retention,color:C[n.tier]})));
+const C=['#60a5fa','#a78bfa','#f472b6','#6b7280'];const nodes=new vis.DataSet(),edges=new vis.DataSet();let lit=new Set(),meta={};
+const net=new vis.Network(g,{nodes,edges},{layout:{randomSeed:7,improvedLayout:true},
+ physics:{solver:'forceAtlas2Based',forceAtlas2Based:{gravitationalConstant:-40,springLength:90,avoidOverlap:.4},stabilization:{iterations:300},maxVelocity:20},
+ interaction:{hover:true,tooltipDelay:80},nodes:{font:{color:'#e5e7eb',size:15,strokeWidth:3,strokeColor:'#070a12'},borderWidth:1},edges:{color:{color:'#1e293b',opacity:.7},smooth:false,selectionWidth:0}});
+net.once('stabilizationIterationsDone',()=>net.setOptions({physics:{enabled:false}}));
+const label=n=>(lit.has(n.id)||n.kind==='semantic'||n.salience>=.7)?n.label:'';
+function style(n){const on=lit.has(n.id);return {id:n.id,label:label(n),title:`${n.label}\n${n.enc}\nretention ${n.retention} · salience ${n.salience}${n.lossy?' · lossy':''}`,
+ shape:n.kind==='semantic'?'diamond':'dot',size:(n.kind==='semantic'?12:5)+14*n.retention+(n.salience>=.7?5:0),color:on?{background:'#fde047',border:'#fff'}:{background:C[n.tier],border:C[n.tier]},borderWidth:on?3:1};}
+const kb=b=>b>=1024?(b/1024).toFixed(1)+' KB':b+' B';
+async function refresh(){const d=await (await fetch('/api/graph')).json();d.nodes.forEach(n=>meta[n.id]=n);
+ const fresh=!nodes.length;nodes.update(d.nodes.map(style));
  const ids=new Set(d.nodes.map(n=>n.id));nodes.getIds().filter(i=>!ids.has(i)).forEach(i=>nodes.remove(i));
- edges.clear();edges.add(d.edges.map(e=>({id:e.from+e.to,from:e.from,to:e.to,width:1+5*e.w})));
- const S=await (await fetch('/api/stats')).json();st.style.color=S.overBudget?'#f87171':'';st.textContent=JSON.stringify(S,null,1);}
-async function post(p,b){const r=await (await fetch('/api/'+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})).json();out.textContent=JSON.stringify(r,null,1);refresh();}
+ edges.clear();edges.add(d.edges.filter(e=>e.w>=.1).map(e=>({id:e.from+'|'+e.to,from:e.from,to:e.to,width:.5+3*e.w})));
+ if(fresh)net.stabilize(300);
+ const S=await (await fetch('/api/stats')).json();st.className=S.overBudget?'over':'';
+ st.innerHTML=`<b>${S.memories}</b> memories · <b>${S.schemas}</b> schemas<br><span class=k>content</span> <b>${kb(S.storedBytes)}</b> for ${kb(S.rawBytes)} raw (<b>${S.compressionRatio}×</b>)<br>`+
+  `<span class=k>index</span> ${kb(S.indexBytes)} · <span class=k>dictionary</span> ${kb(S.dictionaryBytes)}<br><span class=k>total on disk</span> <b>${kb(S.totalBytes)}</b>${S.budgetBytes?` / budget ${kb(S.budgetBytes)}`:''}<br>`+
+  `<span class=k>tiers</span> ${S.tiers.map((t,i)=>`<span style="color:${C[i]}">${t.tier} ${t.nodes}</span>`).join(' · ')}<br><span class=k>lossy</span> ${S.lossyMemories} · min fidelity ${S.minFidelity} · <b>unrecoverable ${S.unrecoverable}</b>`+
+  (S.overBudget?'<br>⚠️ <b>OVER BUDGET</b>: nothing deleted, asking the user':'');}
+async function post(p,b){const r=await (await fetch('/api/'+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})).json();out.textContent=r.report??JSON.stringify(r,null,1);refresh();}
 new EventSource('/api/events').onmessage=e=>{const ev=JSON.parse(e.data);if(ev.type!=='recall')return refresh();
- const a=ev.activation;nodes.update(Object.keys(a).map(id=>({id,color:{background:'#fde047',border:ev.winners.includes(id)?'#fff':'#fde047'},borderWidth:ev.winners.includes(id)?4:1,opacity:Math.max(.3,a[id])})));
- setTimeout(refresh,2500);};
+ const a=ev.activation;lit=new Set(ev.winners);
+ nodes.update(Object.keys(a).filter(id=>meta[id]).map(id=>({id,label:lit.has(id)?meta[id].label:'',color:{background:'#fde047',border:lit.has(id)?'#fff':'#fde047'},borderWidth:lit.has(id)?4:1,opacity:Math.max(.35,a[id])})));
+ setTimeout(()=>{refresh()},2500);setTimeout(()=>{lit=new Set();refresh()},9000);};
 refresh();
 </script></body></html>

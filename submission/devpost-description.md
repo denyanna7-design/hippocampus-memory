@@ -21,7 +21,7 @@ Hippocampus is an MCP server any Alexa+ agent can call. It has six tools:
 | `recall(cue, k?)` | Spreading-activation recall. Returns the text plus how it is stored and whether it is exact or reconstructed (with its fidelity) |
 | `sleep()` | Consolidation: forms **schemas** from similar episodes, retrains a compression dictionary on your own memories, and moves faded memories to colder tiers. Returns a **per-tier compression report** |
 | `compress_preview()` | Dry run of the next pass: expected ratios and fidelity, nothing written |
-| `memory_stats()` | Tiers, ratios, fidelity, budget and alert state, last report |
+| `memory_stats()` | Tiers, ratios, fidelity, content / dictionary / index / total bytes, budget and alert state, last report |
 | `inspect(id)` | One memory: retention, tier, neighbours, when it will move colder, and whether it is protected |
 
 Brain-inspired dynamics:
@@ -65,7 +65,7 @@ A **simulated Alexa+ client** (allowed by the track rules) drives the server ove
   - hunks ranked by importance (numbers > names > CJK > other words);
   - greedy selection of the fewest hunks that keep ROUGE-L above the tier floor;
   - dropped details fall back to the schema's wording.
-- **Tests:** `node:test`, 10 suites. They cover byte-exact codec round trips, fidelity floors on a realistic corpus, never-unrecoverable, report format, a dry run that writes nothing, and budget alerts.
+- **Tests:** `node:test`, 11 suites. They cover byte-exact codec round trips, fidelity floors on a realistic corpus, never-unrecoverable, report format, a dry run that writes nothing, budget alerts, and the compact index (size bounds, plus a reload test with byte-exact text and identical recall).
 - **Viz:** vis-network with server-sent events.
 
 ## Challenges we ran into

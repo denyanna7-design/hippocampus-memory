@@ -3,3 +3,9 @@ node_modules
 .env
 .venv
 data/
+
+submission/video/*.mp4
+submission/video/work/
+submission/video/work2/*
+!submission/video/work2/record.py
+!submission/video/work2/build.sh

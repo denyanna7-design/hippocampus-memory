@@ -139,3 +139,24 @@ test("tampering detected; schema memories pinned lossless", async () => {
   const { e: e2 } = mk(); const n = await e2.remember("Integrity matters.");
   writeFileSync(join(e2.dir, "raw", readdirSync(join(e2.dir, "raw"))[0]), "x"); assert.throws(() => e2.text(n.id), /integrity/);
 });
+
+test("compact index: small vs content, reloads with identical recall and byte-exact text", async () => {
+  const { e, skip } = mk();
+  const dir = e.dir; const items = corpus(120);
+  for (const m of items) { await e.remember(m.text, m.salience); skip(0.25); }
+  await e.sleep(); skip(40); await e.sleep(); skip(40); await e.sleep();
+  e.flush(); const f = e.footprint(); const st = e.stats();
+  console.log(JSON.stringify(f));
+  assert.equal(f.totalBytes, f.contentBytes + f.dictionaryBytes + f.indexBytes);
+  assert.ok(f.indexBytes < st.rawBytes / 2, `index ${f.indexBytes} B vs raw ${st.rawBytes} B`);
+  assert.ok(f.indexBytes / e.nodes.size < 80, `index ${Math.round(f.indexBytes / e.nodes.size)} B per memory`);
+  assert.ok(f.dictionaryBytes <= Math.max(1024, st.rawBytes / 6) + 64, `dictionaries ${f.dictionaryBytes} B`);
+  assert.deepEqual(readdirSync(dir).filter(x => /^(nodes|edges\.json|meta\.json)$/.test(x)), []);
+  const e2 = new MemoryEngine({ dir, now: e.now });
+  assert.equal(e2.nodes.size, e.nodes.size);
+  for (const [id] of e.nodes) assert.equal(e2.text(id), e.text(id)); // integrity tags verified on every read
+  const lossless = [...e.nodes.values()].filter(n => !n.lossy && n.kind === "episodic").slice(0, 10);
+  for (const n of lossless) assert.equal(e2.text(n.id), items.find(m => m.text === e.text(n.id))?.text);
+  const cue = "Grandpa hospital checkup";
+  assert.deepEqual((await e2.recall(cue)).map(h => h.id).slice(0, 1), (await e.recall(cue)).map(h => h.id).slice(0, 1));
+});

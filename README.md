@@ -19,7 +19,8 @@ Built for the Amazon Developer Hackathon, Alexa+ track. MIT licensed.
 npm install
 npm start                    # MCP: http://localhost:3000/mcp · brain view: http://localhost:3000/
 npm run alexa:demo:full      # in a 2nd terminal: simulated Alexa+ conversations across sessions (MCP client)
-npm run alexa:demo -- --chat # interactive simulated Alexa+ (/sleep, /skip 30, /stats, /quit)
+npm run alexa:demo -- --chat # interactive simulated Alexa+ (/sleep, /skip 30, /stats, /quit; piped stdin works)
+npm run alexa:demo:video     # smaller curated 2-week history used for the demo video
 npm test && npm run typecheck
 ```
 Docker: `docker build -t hippocampus . && docker run -p 3000:3000 -v $PWD/data:/data hippocampus`
@@ -33,9 +34,9 @@ Alexa+ / any MCP client ──POST /mcp──► server.ts (stateless, one McpSe
                                    MemoryEngine (src/memory/engine.ts)
                     ┌──────────────┬──────┴───────┬────────────────┐
               Embedder (pluggable)  Summarizer (pluggable)   data/memory/
-              local TF vector       extractive | OpenAI-compat   nodes/<id>.json (metadata+index)
+              local TF vector       extractive | OpenAI-compat   index.bin (zstd-19 compact index)
                                                                  raw/<id>.txt|.z|.dz  chunks/<sha>.br
-                                                                 packs/cold.pack  edges.json  meta.json
+                                                                 packs/{cool,cold}.pack  dicts/<id>.dict
 Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/events (recall lights up nodes)
 ```
 
@@ -63,12 +64,22 @@ Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/e
 
 **Guarantees.**
 1. Nothing is ever deleted.
-2. Every memory can always be reconstructed: schemas are pinned lossless, and every read is integrity-checked with sha256 (of the original for lossless memories, of the reconstruction for lossy ones).
+2. Every memory can always be reconstructed: schemas are pinned lossless, and every read is integrity-checked with a 64-bit sha256 tag (of the original for lossless memories, of the reconstruction for lossy ones).
 3. A memory's measured fidelity is never below its tier floor. Fidelity is computed against the original at compression time and stored per node.
 4. High-salience memories, delta bases and memories without a schema stay byte-exact.
 5. A lossy memory never "warms" back up. A recalled lossless memory returns to the warm tier.
 
 **Budget.** `MEMORY_BUDGET_BYTES`. When exceeded, the weakest memories are forced down to cool, then cold (fidelity floors still apply). If the store is still over budget, the server raises an **alert** instead of deleting: `memory_stats.overBudget`/`alert` are set, a ⚠️ line is appended to every MCP tool result, and the alert is logged once.
+
+**Compact index.** All metadata lives in one file, `data/memory/index.bin`: a JSON header plus a binary edge table (two uint16 node indices and a uint8 weight per edge), compressed with zstd-19 and written atomically, once per tick. Redundant fields are not stored. Keywords, schema members and summaries are re-derived. Vectors from the default local embedder are recomputed from the stored text; for a faded memory they come from its reconstruction, so it is cued by what is left of it. Hashes are 64-bit tags. During sleep, weak associations beyond each memory's six strongest links are pruned ("synaptic pruning"); memories themselves are never pruned. The trained zstd dictionary is capped at 1/6 of the raw corpus, and memories that still use an old dictionary are re-encoded during sleep so it can be retired. `memory_stats` and the budget report `contentBytes`, `dictionaryBytes`, `indexBytes` and `totalBytes` separately, and the budget applies to the total. An older store using `nodes/*.json` is migrated automatically.
+
+| Store | Raw | Content | Dictionary | Index | Total on disk |
+|---|---|---|---|---|---|
+| `alexa:demo:full` (151 memories, 30 days) | 23.7 KB | 5.3 KB | 2.6 KB | 8.7 KB | 16.6 KB |
+| `alexa:demo:video` (52 memories, 14 days) | 5.1 KB | 1.8 KB | 1.0 KB | 3.3 KB | 6.1 KB |
+| before this change (`alexa:demo:full`) | 23.7 KB | 5.0 KB | 60.3 KB | ~250 KB | ~308 KB |
+
+The index costs about 60–65 B per memory (an 8-character id, a 64-bit hash, tier/encoding and fidelity numbers, timestamps, and on average four or five pruned edges). Content for these short memories compresses to about 35 B each, so the index is still larger than the content. It is about a third of the raw size, and is now proportional to the number of memories rather than the dominant cost.
 
 **Compression report.** Every pass (`sleep`, time-skip, budget enforcement) produces a per-tier report with: target ratio and fidelity floor, before / expected (planned) / after for nodes, raw→stored bytes, ratio, ROUGE-L mean and minimum, char similarity, algorithms used, and moves. It is returned by `sleep`, stored in `memory_stats.lastReport`, and appended to `data/memory/compaction.log` as text plus a JSON line. `compress_preview` (or `GET /api/preview`) is a dry run that writes nothing. It doesn't form new schemas; those are created at the start of a real `sleep`.
 
@@ -103,4 +114,4 @@ Demo REST helpers (not part of MCP):
 - `GET /api/graph`, `/api/stats`, `/api/events`
 
 ## Demo
-The full shot list is in `submission/demo-video-script.md`. Short version: run `npm start`, open `http://localhost:3000/`, run `npm run alexa:demo:full` in a second terminal and watch the graph light up, click 🔍 preview pass / 😴 sleep / ⏩ +7 days, then restart with `MEMORY_BUDGET_BYTES=9000` to show the alert.
+The full shot list is in `submission/demo-video-script.md`. Short version: run `npm start`, open `http://localhost:3000/`, run `npm run alexa:demo:video` (or `alexa:demo:full`) in a second terminal and watch the graph light up, click 🔍 preview pass / 😴 sleep / ⏩ +7 days, then restart with `MEMORY_BUDGET_BYTES=5000` (after `alexa:demo:video`) to show the alert. The brain view labels only recalled memories, schemas and important memories; hover over any dot for details.

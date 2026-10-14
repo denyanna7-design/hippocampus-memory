@@ -53,7 +53,8 @@ async function skip(days: number, quiet = false) {
   if (!quiet) console.log(`\n⏩ ${days} days later… (server clock +${r.days}d)`);
 }
 
-const SCRIPT: (string | { skip: number } | { banner: string })[] = [
+const CURATED = process.argv.includes("--curated");
+const SCRIPT: (string | { skip: number } | { banner: string } | { full: string })[] = [
   { banner: "Session 1 · Monday evening" },
   "My daughter Mia loves strawberries.",
   "The farmers market sells strawberries on Saturday mornings.",
@@ -65,42 +66,51 @@ const SCRIPT: (string | { skip: number } | { banner: string })[] = [
   "Good night",
   { skip: 3 },
   { banner: "Session 2 · Thursday — a brand-new conversation" },
-  "What does Mia love?",
+  "What does my daughter love?",
   "When is Grandpa's checkup?",
   "Good night",
   { skip: 60 },
   { banner: "Session 3 · two months later" },
   "What did I have for lunch at the canteen?",
-  "What happened in the weekly sync about the release?",
+  { full: "What happened in the weekly sync about the release?" },
   "When does Mia swim?",
   "When is Grandpa's checkup?",
 ];
 
 /** --with-history: give the agent a month of everyday life first (via MCP), so schemas and compression have material. */
 async function history(days = 30) {
-  console.log(`\n📚 Loading ${days} days of everyday memories (standups, commutes, lunches, journals)…`);
+  // --curated: a smaller, cleaner two-week history for the demo video (routines + one-offs, no long journals/notes)
+  const mems = CURATED ? corpus(14).filter(m => /^(Lunch|Commute|Gym|Standup)/.test(m.text) || m.salience >= 0.7) : corpus(days);
+  if (CURATED) days = 14;
+  console.log(`\n📚 Loading ${days} days of everyday memories (${CURATED ? `${mems.length} memories: standups, commutes, lunches, gym` : "standups, commutes, lunches, journals"})…`);
   let day = 0;
-  await session(async c => { for (const m of corpus(days)) { while (day < m.day) { await c("sleep"); await skip(1, true); day++; } await c("remember", { text: m.text, salience: m.salience }); } });
+  await session(async c => { for (const m of mems) { while (day < m.day) { await c("sleep"); await skip(1, true); day++; } await c("remember", { text: m.text, salience: m.salience }); } });
 }
 async function scripted() {
-  if (process.argv.includes("--with-history")) await history();
+  if (process.argv.includes("--with-history") || CURATED) await history();
   for (const step of SCRIPT) {
     if (typeof step === "string") await session(c => turn(c, step));       // every turn = fresh MCP session
+    else if ("full" in step) { if (!CURATED) await session(c => turn(c, step.full)); }
     else if ("skip" in step) await skip(step.skip);
     else { console.log(`\n━━━━━━━━ ${step.banner} ━━━━━━━━`); await pause(800); }
   }
   const st = await session(c => c("memory_stats"));
-  console.log(`\n📊 ${st.memories} memories, ${st.schemas} schemas, stored ${st.storedBytes}B for ${st.rawBytes}B raw (${st.compressionRatio}x), lossy ${st.lossyMemories}, min fidelity ${st.minFidelity}, unrecoverable ${st.unrecoverable}`);
+  console.log(`\n📊 ${st.memories} memories, ${st.schemas} schemas, content ${st.storedBytes}B for ${st.rawBytes}B raw (${st.compressionRatio}x) + index ${st.indexBytes}B + dictionary ${st.dictionaryBytes}B = ${st.totalBytes}B on disk, lossy ${st.lossyMemories}, min fidelity ${st.minFidelity}, unrecoverable ${st.unrecoverable}`);
 }
 async function chat() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  for (;;) {
-    const line = (await rl.question("\nyou> ")).trim(); if (!line) continue;
+  // async-iterate lines so piped input / Ctrl-D (stdin end) exits cleanly instead of ERR_USE_AFTER_CLOSE
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
+  const prompt = () => process.stdout.write("\nyou> ");
+  prompt();
+  for await (const raw of rl) {
+    const line = raw.trim(); if (!line) { prompt(); continue; }
+    if (!process.stdin.isTTY) console.log(line); // echo piped input
     if (line === "/quit") break;
-    if (line.startsWith("/skip")) { await skip(Number(line.split(" ")[1] ?? 7)); continue; }
-    if (line === "/sleep") { await session(c => turn(c, "good night")); continue; }
-    if (line === "/stats") { console.log(await session(c => c("memory_stats"))); continue; }
+    if (line.startsWith("/skip")) { await skip(Number(line.split(" ")[1] ?? 7)); prompt(); continue; }
+    if (line === "/sleep") { await session(c => turn(c, "good night")); prompt(); continue; }
+    if (line === "/stats") { console.log(await session(c => c("memory_stats"))); prompt(); continue; }
     await session(c => turn(c, line));
+    prompt();
   }
   rl.close();
 }

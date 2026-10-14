@@ -73,3 +73,19 @@ Every entry happened during development of this project (Oct 14, 2026). Severity
 - **Severity:** Low.
 - **Workaround:** resolve the main entry and read the `package.json` next to it.
 - **Suggestion:** add `"./package.json": "./package.json"` to `exports`.
+
+### F9: the metadata index was 60× bigger than the memories
+- **Task:** show sensible storage numbers in the demo.
+- **Steps:** ran `alexa:demo:full` with a storage budget.
+- **Expected:** the budget is dominated by memory content.
+- **Actual:** 5 KB of compressed content, but about 250 KB of per-node JSON (full float vectors, 64-character hashes, summaries duplicating short texts), 88 KB of edge JSON, and 60 KB of stale zstd dictionaries. The budget alert reported 315 KB.
+- **Severity:** Medium. The numbers looked wrong and made the budget meaningless.
+- **Workaround:** a single zstd-compressed `index.bin`: derived fields re-computed, 64-bit hash tags, binary uint8 edge weights, top-6 edge pruning during sleep, dictionary capped at 1/6 of raw, and stale-dictionary re-encoding. Result: 16.6 KB total (content 5.3 KB, dictionary 2.6 KB, index 8.7 KB).
+- **Suggestion:** when building on-disk agent memory, budget the index from day one. With ~100-byte memories, metadata is the dominant cost.
+
+### F10: `readline/promises` throws when piped stdin ends
+- **Task:** script the interactive Alexa+ chat (`printf '...' | npm run alexa:demo -- --chat`).
+- **Actual:** after the last line, `rl.question()` throws `ERR_USE_AFTER_CLOSE`.
+- **Severity:** Low.
+- **Workaround:** iterate lines with `for await (const line of rl)`, which ends cleanly on EOF.
+- **Suggestion:** Node docs could note that `question()` must not be called after the input stream ends.
