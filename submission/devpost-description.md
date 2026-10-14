@@ -65,7 +65,7 @@ A **simulated Alexa+ client** (allowed by the track rules) drives the server ove
   - hunks ranked by importance (numbers > names > CJK > other words);
   - greedy selection of the fewest hunks that keep ROUGE-L above the tier floor;
   - dropped details fall back to the schema's wording.
-- **Tests:** `node:test`, 17 tests in two files. They cover byte-exact codec round trips, fidelity floors on a realistic corpus, never-unrecoverable, report format, a dry run that writes nothing, budget alerts, fuzzed round trips (300+ random Unicode texts, empty, 200 KB, lone surrogates) through every tier with reloads, randomized fidelity-floor checks, corruption detection, 60 parallel writes, and the compact index (size bounds, plus a reload test with byte-exact text and identical recall).
+- **Tests:** `node:test`, 19 tests in two files. They cover byte-exact codec round trips, fidelity floors on a realistic corpus, never-unrecoverable, report format, a dry run that writes nothing, budget alerts, fuzzed round trips (300+ random Unicode texts, empty, 200 KB, lone surrogates) through every tier with reloads, randomized fidelity-floor checks, corruption detection, 60 parallel writes, exact budget-alert accounting, byte-identical deterministic runs, and the compact index (size bounds, plus a reload test with byte-exact text and identical recall).
 - **Viz:** vis-network with server-sent events.
 
 ## Challenges we ran into

@@ -104,3 +104,23 @@ test("budget: alert reports content+dictionary+index = total, nothing deleted, c
   assert.equal(st.unrecoverable, 0);
   e.budgetBytes = 1e9; await e.enforceBudget(); assert.equal(e.stats().overBudget, false);
 });
+
+test("budget alert numbers equal memory_stats exactly (index does not persist the alert) and are recomputed at load", async () => {
+  const { e } = mk({ budgetBytes: 2500 }); for (const m of corpus(6)) await e.remember(m.text, m.salience);
+  await new Promise(r => setImmediate(r));
+  const st = e.stats(); assert.equal(st.alert!.totalBytes, st.totalBytes); assert.ok(st.alert!.message.includes(`${st.totalBytes} B (content ${st.contentBytes} B`));
+  const r = new MemoryEngine({ dir: e.dir, now: e.now, budgetBytes: 2500, log: () => {} });
+  assert.equal(r.stats().overBudget, true, "over budget is known right after restart");
+  assert.equal(new MemoryEngine({ dir: e.dir, now: e.now, log: () => {} }).stats().overBudget, false, "no stale alert without a budget");
+});
+
+test("deterministic: same clock + id generator ⇒ byte-identical store", async () => {
+  const run = async () => {
+    let t = Date.UTC(2026, 9, 1), k = 0; const e = new MemoryEngine({ dir: mkdtempSync(join(tmpdir(), "det-")), now: () => t, newId: () => (k++).toString(16).padStart(8, "0"), log: () => {} });
+    for (const m of corpus(14)) { await e.remember(m.text, m.salience); t += DAY / 4; }
+    await e.sleep(); t += 60 * DAY; await e.sleep(); await e.recall("lunch canteen"); e.flush();
+    return { idx: readFileSync(join(e.dir, "index.bin")), st: JSON.stringify({ ...e.stats(), lastReport: null }) };
+  };
+  const a = await run(), b = await run();
+  assert.ok(a.idx.equals(b.idx)); assert.equal(a.st, b.st);
+});

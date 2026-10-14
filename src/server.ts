@@ -5,12 +5,18 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { MemoryEngine, DAY } from "./memory/engine.js";
 import { summarizerFromEnv } from "./memory/providers.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 let offset = 0; // demo-only time travel (POST /api/timeskip)
-export const engine = new MemoryEngine({ dir: process.env.MEMORY_DIR ?? join(root, "data/memory"), now: () => Date.now() + offset, summarizer: summarizerFromEnv() });
+// DEMO_EPOCH=<ms> freezes the clock (only /api/timeskip moves it) and makes ids deterministic, so a demo run is byte-for-byte reproducible.
+const epoch = process.env.DEMO_EPOCH ? Number(process.env.DEMO_EPOCH) : null;
+let idSeq = 0; const ids = new Set<string>();
+const newId = epoch === null ? undefined : () => { let id; do id = createHash("sha256").update(`hippocampus-demo-${idSeq++}`).digest("hex").slice(0, 8); while (ids.has(id) || engine?.nodes.has(id)); ids.add(id); return id; };
+export const engine: MemoryEngine = new MemoryEngine({ dir: process.env.MEMORY_DIR ?? join(root, "data/memory"), now: () => (epoch ?? Date.now()) + offset, summarizer: summarizerFromEnv(), newId });
+if (epoch !== null) { idSeq = engine.nodes.size * 7919; }
 // Every tool result carries the budget alert (if any) so the agent/user is asked to decide; nothing is auto-deleted.
 const json = (x: unknown) => {
   const content = [{ type: "text" as const, text: JSON.stringify(x, null, 2) }];

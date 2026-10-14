@@ -58,3 +58,9 @@ Rehearse once with `DEMO_PACE=0 npm run alexa:demo:video` to warm caches. Then r
 - captions that slide in
 - the brain view's new animations: glowing activation pulses travel along edges; on sleep, memories drift into their schema clusters, shrink, and a byte counter ticks down with per-tier bars; colour and size changes fade smoothly between tiers
 - shot 5, an animated per-tier chart with ratios counting up, from the 290-memory test corpus (warm 2.9×, cool 5.2×, cold 8.9×; content 47.9 → 5.6 KB, 8.6×)
+
+## Rendered v4
+`submission/video/demo-v4.mp4` (2:23) is rendered from `narration-v4.txt` with `video/work4/record.py` and `build.py`.
+- **Reproducible.** Everything is captured with `DEMO_EPOCH=1793750400000` from one deterministic run. The shot 8 terminal and the browser come from the same server and state, and both show 5630 B against the 5000 B budget.
+- **Brain view.** It uses the new canvas renderer: particle-trail pulses, camera zoom, sleep replay, fold and condense, the morphing tier bars, and a tier gradient legend.
+- **Video effects.** Kinetic word-by-word captions are injected into each page, there are 0.6 s transitions between shots, and the end card is animated with a QR code to the repo.

@@ -55,16 +55,16 @@ export interface PassReport { at: string; dryRun: boolean; moves: Record<string,
   totals: { rawBytes: number; storedBefore: number; storedExpected: number; storedAfter: number; ratioBefore: number; ratioExpected: number; ratioAfter: number }; alert: BudgetAlert | null; text: string; }
 
 type Listener = (ev: { type: string; [k: string]: unknown }) => void;
-export interface EngineOpts { dir: string; now?: () => number; embedder?: Embedder; summarizer?: Summarizer; budgetBytes?: number; log?: (m: string) => void; }
+export interface EngineOpts { dir: string; newId?: () => string; now?: () => number; embedder?: Embedder; summarizer?: Summarizer; budgetBytes?: number; log?: (m: string) => void; }
 
 export class MemoryEngine {
-  readonly dir: string; now: () => number; embedder: Embedder; summarizer: Summarizer; budgetBytes: number; store: RawStore;
+  readonly dir: string; now: () => number; newId: () => string; embedder: Embedder; summarizer: Summarizer; budgetBytes: number; store: RawStore;
   nodes = new Map<string, MemoryNode>(); edges = new Map<string, number>();
   meta: { lastSleep: number; lastId: string; alert: BudgetAlert | null; dict: string | null; lastReport: PassReport | null } = { lastSleep: 0, lastId: "", alert: null, dict: null, lastReport: null };
   private listeners: Listener[] = []; private log: (m: string) => void;
 
   constructor(o: EngineOpts) {
-    this.dir = o.dir; this.now = o.now ?? Date.now; this.embedder = o.embedder ?? localEmbedder; this.summarizer = o.summarizer ?? extractiveSummarizer;
+    this.dir = o.dir; this.now = o.now ?? Date.now; this.newId = o.newId ?? (() => randomUUID().slice(0, 8)); this.embedder = o.embedder ?? localEmbedder; this.summarizer = o.summarizer ?? extractiveSummarizer;
     this.budgetBytes = o.budgetBytes ?? Number(process.env.MEMORY_BUDGET_BYTES ?? Infinity); this.log = o.log ?? (m => console.warn(m));
     mkdirSync(this.dir, { recursive: true }); this.store = new RawStore(this.dir);
     const idx = readIndex(join(this.dir, "index.bin"));
@@ -85,6 +85,16 @@ export class MemoryEngine {
       const mf = join(this.dir, "meta.json"); if (existsSync(mf)) this.meta = { ...this.meta, ...JSON.parse(readFileSync(mf, "utf8")) };
       this.flush(); for (const x of ["nodes", "edges.json", "meta.json"]) rmSync(join(this.dir, x), { recursive: true, force: true });
     }
+    this.checkBudgetSync();
+  }
+  /** Budget state is derived from what is on disk, so it is (re)computed at load instead of being trusted from the index. */
+  private checkBudgetSync() {
+    if (!Number.isFinite(this.budgetBytes)) { this.meta.alert = null; return; }
+    const f = this.footprint();
+    this.meta.alert = f.totalBytes > this.budgetBytes ? { level: "over_budget", totalBytes: f.totalBytes, budgetBytes: this.budgetBytes, at: this.now(), message: this.alertMessage(f) } : null;
+  }
+  private alertMessage(f: ReturnType<MemoryEngine["footprint"]>) {
+    return `Memory store is ${f.totalBytes} B (content ${f.contentBytes} B + dictionaries ${f.dictionaryBytes} B + index ${f.indexBytes} B), over the ${this.budgetBytes} B budget, and every memory is already in its deepest allowed tier (fidelity floors and high-salience memories are protected). Nothing was deleted. Please decide: raise MEMORY_BUDGET_BYTES, export/archive memories elsewhere, or explicitly approve deleting specific memories.`;
   }
   on(l: Listener) { this.listeners.push(l); return () => { this.listeners = this.listeners.filter(x => x !== l); }; }
   private emit(ev: { type: string; [k: string]: unknown }) { for (const l of this.listeners) l(ev); }
@@ -96,7 +106,7 @@ export class MemoryEngine {
     this.dirty = false; const lr = this.meta.lastReport;
     // lossless memories with the default local embedder: the vector is a pure function of the text, so it is not stored
     const derivable = (n: MemoryNode) => this.embedder.name === "local-tf" && this.vecSrc.get(n.id) === true;
-    writeIndex(join(this.dir, "index.bin"), this.nodes, this.edges, { ...this.meta, lastReport: lr ? { at: lr.at, totals: lr.totals, moves: lr.moves } : null }, derivable);
+    writeIndex(join(this.dir, "index.bin"), this.nodes, this.edges, { ...this.meta, alert: null, lastReport: lr ? { at: lr.at, totals: lr.totals, moves: lr.moves } : null } /* alert is derived state: persisting it would make the index size depend on the alert text */, derivable);
   }
   private key(a: string, b: string) { return a < b ? `${a}|${b}` : `${b}|${a}`; }
   weight(a: string, b: string) { return this.edges.get(this.key(a, b)) ?? 0; }
@@ -140,7 +150,7 @@ export class MemoryEngine {
   private async create(text: string, kind: MemoryNode["kind"], salience: number, tags: string[]) {
     const raw = Buffer.from(text, "utf8"); const now = this.now(); const s = Math.min(1, Math.max(0, salience));
     const vector = await this.embedder.embed(text + " " + tags.join(" "));
-    const n: MemoryNode = { id: randomUUID().slice(0, 8), kind, tier: 0, enc: { enc: "plain" }, sha256: sha(raw), rawBytes: raw.length, fid: { rouge: 1, char: 1 },
+    const n: MemoryNode = { id: this.newId(), kind, tier: 0, enc: { enc: "plain" }, sha256: sha(raw), rawBytes: raw.length, fid: { rouge: 1, char: 1 },
       keywords: Object.keys(topTerms(vector, 6)), vector, salience: s, stability: P.baseStability * (1 + 3 * s), createdAt: now, lastAccess: now, accessCount: 0, tags };
     this.vecSrc.set(n.id, JSON.stringify(localTf(text + " " + tags.join(" "))) === JSON.stringify(vector));
     this.store.writeFile(`${n.id}.txt`, raw); this.nodes.set(n.id, n); this.saveNode(n); return n;
@@ -277,7 +287,7 @@ export class MemoryEngine {
       cl.forEach(c => used.add(c.id));
       const medoid = cl.map(c => ({ c, s: cl.reduce((acc, d) => acc + cosine(c.vector, d.vector), 0) })).sort((x, y) => y.s - x.s)[0].c;
       const sraw = this.readRaw(medoid);
-      const s: MemoryNode = { ...structuredClone(medoid), id: randomUUID().slice(0, 8), kind: "schema", pinned: true, members: cl.map(c => c.id), tier: 0, enc: { enc: "plain" }, schema: undefined, tags: ["schema"], salience: 1 };
+      const s: MemoryNode = { ...structuredClone(medoid), id: this.newId(), kind: "schema", pinned: true, members: cl.map(c => c.id), tier: 0, enc: { enc: "plain" }, schema: undefined, tags: ["schema"], salience: 1 };
       this.vecSrc.set(s.id, JSON.stringify(localTf(sraw.toString("utf8") + " ")) === JSON.stringify(s.vector));
       this.store.writeFile(`${s.id}.txt`, sraw); this.nodes.set(s.id, s); this.saveNode(s); created++;
       for (const c of cl) { c.schema = s.id; this.saveNode(c); this.setWeight(s.id, c.id, 0.8); }
@@ -410,10 +420,9 @@ export class MemoryEngine {
         if (Object.keys(force).length) await this.pass({ force, quiet: true });
       }
     }
-    const total = this.totalBytes();
+    const f = this.footprint(); const total = f.totalBytes;
     if (total > this.budgetBytes) {
-      const alert: BudgetAlert = { level: "over_budget", totalBytes: total, budgetBytes: this.budgetBytes, at: this.now(),
-        message: `Memory store is ${total} B (${(() => { const f = this.footprint(); return `content ${f.contentBytes} B + dictionaries ${f.dictionaryBytes} B + index ${f.indexBytes} B`; })()}), over the ${this.budgetBytes} B budget, and every memory is already in its deepest allowed tier (fidelity floors and high-salience memories are protected). Nothing was deleted. Please decide: raise MEMORY_BUDGET_BYTES, export/archive memories elsewhere, or explicitly approve deleting specific memories.` };
+      const alert: BudgetAlert = { level: "over_budget", totalBytes: total, budgetBytes: this.budgetBytes, at: this.now(), message: this.alertMessage(f) };
       if (!this.meta.alert) this.log(`[memory] ALERT ${alert.message}`);
       this.meta.alert = alert; this.emit({ type: "alert", alert });
     } else this.meta.alert = null;
@@ -443,7 +452,7 @@ export class MemoryEngine {
   verify(): string[] { const bad: string[] = []; for (const n of this.nodes.values()) { try { this.readRaw(n); } catch { bad.push(n.id); } } return bad; }
   graph() {
     const now = this.now();
-    return { nodes: [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, enc: algOf(n.enc), kind: n.kind === "schema" ? "semantic" : "episodic", lossy: !!n.lossy, schema: n.schema ?? null, rawBytes: n.rawBytes, label: n.keywords.slice(0, 3).join(" "), retention: round(retention(n, now)), salience: n.salience })),
+    return { nodes: [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, enc: algOf(n.enc), kind: n.kind === "schema" ? "semantic" : "episodic", lossy: !!n.lossy, schema: n.schema ?? null, rawBytes: n.rawBytes, createdAt: n.createdAt, label: n.keywords.slice(0, 3).join(" "), retention: round(retention(n, now)), salience: n.salience })),
       edges: [...this.edges].map(([k, w]) => { const [from, to] = k.split("|"); return { from, to, w: round(w) }; }) };
   }
 }
