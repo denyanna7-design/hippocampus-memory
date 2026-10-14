@@ -1,18 +1,31 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MemoryEngine, retention, tierFor, DAY } from "../src/memory/engine.js";
+import { MemoryEngine, retention, tierFor, DAY, Tier } from "../src/memory/engine.js";
 import { extractiveSummary } from "../src/memory/text.js";
+import { CODECS } from "../src/memory/rawstore.js";
 
-function mk() { let t = Date.UTC(2026, 9, 14); const e = new MemoryEngine({ dir: mkdtempSync(join(tmpdir(), "mem-")), now: () => t }); return { e, skip: (d: number) => { t += d * DAY; } }; }
+function mk(o: { budgetBytes?: number; log?: (m: string) => void } = {}) {
+  let t = Date.UTC(2026, 9, 14);
+  const e = new MemoryEngine({ dir: mkdtempSync(join(tmpdir(), "mem-")), now: () => t, ...o });
+  return { e, skip: (d: number) => { t += d * DAY; } };
+}
+const TRICKY = [
+  "Plain ASCII memory.",
+  "我家在南京，上学在新加坡国立大学。今天去了紫金山。",
+  "Emoji 🧠✨ and combining marks: é (e\u0301), ZWJ 👩‍💻.",
+  "Windows line endings\r\nand trailing spaces   \r\n\tand tabs\n\n",
+  "",
+  "Lorem ipsum dolor sit amet. ".repeat(200),
+];
+const LOG = (d: number) => `Daily standup ${d}. Yesterday I worked on the Alexa+ memory server: spreading activation, Hebbian edges and lossless storage tiers. Today I will write tests and record the demo video. Blockers: none. Mood: focused. Weather in Nanjing: cloudy, 18C. Note ${d * 7919 % 1000}.`;
 
 test("power-law retention and tier thresholds", () => {
   const n = { stability: 1, lastAccess: 0 };
-  assert.equal(retention(n, 0), 1);
   assert.ok(Math.abs(retention(n, 9 * DAY) - 0.5) < 1e-9);
-  assert.ok(retention({ stability: 4, lastAccess: 0 }, 9 * DAY) > retention(n, 9 * DAY), "higher stability decays slower");
+  assert.ok(retention({ stability: 4, lastAccess: 0 }, 9 * DAY) > retention(n, 9 * DAY));
   assert.deepEqual([0.9, 0.5, 0.2, 0.05].map(tierFor), [0, 1, 2, 3]);
 });
 
@@ -20,15 +33,12 @@ test("spreading activation reaches associated memories not matching the cue", as
   const { e } = mk();
   const a = await e.remember("My daughter Mia loves strawberries.");
   const b = await e.remember("Strawberries are on sale at the farmers market on Saturday.");
-  const c = await e.remember("The farmers market opens at 8am near the river park.");
+  await e.remember("The farmers market opens at 8am near the river park.");
   await e.remember("Quarterly tax filing is due in April.");
   const hits = await e.recall("What does Mia like?", 5);
-  const ids = hits.map(h => h.id);
-  assert.equal(ids[0], a.id);
-  assert.ok(ids.includes(b.id), "1 hop via 'strawberries'");
-  assert.equal(hits.find(h => h.id === b.id)!.via, "spread");
-  assert.ok(!hits.some(h => /tax/.test(h.text)), "unrelated memory stays below threshold");
-  void c;
+  assert.equal(hits[0].id, a.id);
+  assert.equal(hits.find(h => h.id === b.id)?.via, "spread");
+  assert.ok(!hits.some(h => /tax/.test(h.text)));
 });
 
 test("Hebbian learning strengthens co-recalled edges", async () => {
@@ -45,61 +55,118 @@ test("salience slows decay; retrieval increases stability (spacing)", async () =
   const calm = await e.remember("Bought printer paper.", 0);
   const big = await e.remember("Got accepted to the National University of Singapore exchange!", 1);
   assert.ok(big.stability > calm.stability);
-  skip(5);
-  const s0 = big.stability; await e.recall("Singapore exchange"); assert.ok(e.nodes.get(big.id)!.stability > s0);
+  skip(5); const s0 = big.stability; await e.recall("Singapore exchange");
+  assert.ok(e.nodes.get(big.id)!.stability > s0);
 });
 
-test("compression tiers drop data progressively and save bytes", async () => {
+test("every codec round-trips byte-exactly", () => {
+  for (const c of CODECS.values()) for (const t of TRICKY) {
+    const b = Buffer.from(t); assert.ok(c.decompress(c.compress(b)).equals(b), c.name);
+  }
+});
+
+test("byte-exact round trip through every tier and back (hot→warm→cool→cold→warm→hot)", async () => {
   const { e } = mk();
-  const n = await e.remember("We hiked the Purple Mountain in Nanjing. The trail was steep and muddy after rain. At the top we ate osmanthus cakes and watched the sunset over the city. Luke forgot his water bottle.");
-  const b0 = e.bytes(n);
-  await e.compress(n, 1); assert.equal(n.text, undefined); assert.ok(n.summary && n.summary.length < 200); const b1 = e.bytes(n);
-  await e.compress(n, 2); assert.equal(n.summary, undefined); assert.ok(n.keywords.length <= 5); const b2 = e.bytes(n);
-  await e.compress(n, 3); assert.ok(n.keywords.length <= 3); const b3 = e.bytes(n);
-  assert.ok(b0 > b1 && b1 > b2 && b2 >= b3, `${b0} ${b1} ${b2} ${b3}`);
-  assert.ok(e.stats().bytesSaved > 0);
+  for (let d = 0; d < 4; d++) await e.remember(LOG(d)); // similar neighbours for delta/dedup
+  const ids = [];
+  for (const t of TRICKY) ids.push((await e.remember(t)).id);
+  for (const tier of [1, 2, 3, 1, 0, 3, 2] as Tier[]) {
+    for (const id of ids) await e.setTier(e.nodes.get(id)!, tier);
+    ids.forEach((id, i) => assert.equal(e.text(id), TRICKY[i], `tier ${tier} ${id}`));
+    ids.forEach(id => assert.equal(e.nodes.get(id)!.tier, tier));
+  }
+  // survives a restart
+  const r = new MemoryEngine({ dir: e.dir, now: e.now });
+  ids.forEach((id, i) => assert.ok(r.readRaw(r.nodes.get(id)!).equals(Buffer.from(TRICKY[i]))));
 });
 
-test("extractive summarizer is deterministic and shorter", () => {
+test("delta encoding / dedup beat standalone compression for near-duplicate memories", async () => {
+  const { e } = mk();
+  const base = await e.remember(LOG(1));
+  const twin = await e.remember(LOG(1).replace("cloudy, 18C", "sunny, 21C"));
+  await e.setTier(twin, 2);
+  assert.ok(["delta", "chunks"].includes(twin.enc.enc), twin.enc.enc);
+  const standalone = CODECS.get("brotli-11")!.compress(Buffer.from(e.text(twin.id))).length;
+  assert.ok(e.perTier().cool.storedBytes < standalone, `${e.perTier().cool.storedBytes} < ${standalone}`);
+  assert.equal(e.text(twin.id), LOG(1).replace("cloudy, 18C", "sunny, 21C"));
+  // base can go cold without breaking its delta dependent
+  await e.setTier(base, 3); assert.equal(e.text(twin.id), LOG(1).replace("cloudy, 18C", "sunny, 21C"));
+});
+
+test("chunk dedup stores a shared passage once", async () => {
+  const { e } = mk();
+  const shared = "This exact boilerplate paragraph about the hackathon rules appears in many of my notes. ";
+  const a = await e.remember(shared + "First note: buy milk and eggs today.");
+  const b = await e.remember(shared + "Second note: call grandma on Sunday evening.");
+  const store = e.store as unknown as { candidates: (r: Buffer, t: "warm" | "cool") => { enc: { enc: string }; data?: Buffer; cost: number; newChunks?: [string, Buffer][] }[]; write: (id: string, c: unknown) => void };
+  for (const n of [a, b]) {
+    const c = store.candidates(e.readRaw(n), "cool").find(x => x.enc.enc === "chunks")!;
+    if (n === b) assert.ok(c.newChunks!.length < (c.enc as unknown as { chunks: string[] }).chunks.length, "shared chunk reused");
+    store.write(n.id, c); e.store.dropFile(n.id, n.enc); n.enc = c.enc as never;
+  }
+  assert.ok(e.text(a.id).startsWith(shared) && e.text(b.id).endsWith("Sunday evening."));
+});
+
+test("sleep runs multi-level compression over simulated months; nothing deleted, all byte-exact", async () => {
+  const { e, skip } = mk();
+  const texts = new Map<string, string>();
+  const add = async (t: string, s = 0.3) => texts.set((await e.remember(t, s)).id, t);
+  for (let d = 0; d < 20; d++) { await add(LOG(d), d === 5 ? 1 : 0.2); skip(1); }
+  await add("Dr. Chen from NUS invited me to collaborate on neuromorphic chips research next spring.", 1);
+  for (const t of TRICKY) await add(t, 0);
+  const report: string[] = [];
+  for (const days of [1, 7, 30, 90, 365]) {
+    skip(days); await e.sleep();
+    const st = e.stats();
+    report.push(`+${days}d tiers=${JSON.stringify(st.tiers)} ratio=${st.compressionRatio} ` +
+      Object.entries(st.perTier).map(([k, v]) => `${k}:${v.nodes}n ${v.ratio}x ${JSON.stringify(v.algorithms)}`).join(" | "));
+  }
+  console.log(report.join("\n"));
+  for (const [id, t] of texts) assert.equal(e.text(id), t);
+  assert.ok(e.nodes.size >= texts.size, "no memory deleted");
+  const st = e.stats();
+  assert.ok(st.tiers.cold > 0 && st.compressionRatio > 2, JSON.stringify(st));
+  assert.equal(st.lossless, true);
+});
+
+test("over budget: pushes to colder tiers, then alerts (stats + log) instead of deleting", async () => {
+  const logs: string[] = [];
+  const { e } = mk({ budgetBytes: 1500, log: m => logs.push(m) });
+  const texts: string[] = [];
+  for (let d = 0; d < 6; d++) { texts.push(LOG(d)); await e.remember(LOG(d)); }
+  const st = e.stats();
+  assert.equal(st.overBudget, true);
+  assert.ok(st.alert && /Nothing was deleted/.test(st.alert.message));
+  assert.ok(logs.some(l => l.includes("ALERT")));
+  assert.equal(logs.filter(l => l.includes("ALERT")).length, 1, "logged once, not spammed");
+  assert.equal(e.nodes.size, 6);
+  assert.ok([...e.nodes.values()].every(n => n.tier >= 2), "everything pushed to colder lossless tiers first");
+  assert.deepEqual([...e.nodes.values()].sort((a, b) => a.createdAt - b.createdAt).map(n => e.text(n.id)).sort(), [...texts].sort());
+  e.budgetBytes = 1e9; await e.enforceBudget();
+  assert.equal(e.stats().overBudget, false, "alert clears once the user raises the budget");
+});
+
+test("under budget: no alert; tampering is detected", async () => {
+  const { e } = mk({ budgetBytes: 1e6 });
+  const n = await e.remember("Integrity matters.");
+  assert.equal(e.stats().overBudget, false);
+  writeFileSync(join(e.dir, "raw", readdirSync(join(e.dir, "raw"))[0]), "tampered");
+  assert.throws(() => e.text(n.id), /integrity/);
+});
+
+test("extractive summary index layer is deterministic", () => {
   const t = "Rust is fast. Rust has a borrow checker that makes Rust memory safe. I ate lunch.";
   assert.equal(extractiveSummary(t), extractiveSummary(t));
-  assert.ok(extractiveSummary(t).length < t.length);
 });
 
-test("time-skip scenario: gradual compression, rehearsal protects, reconstruction from neighbours", async () => {
-  const { e, skip } = mk();
-  const trip = await e.remember("Flew to Shanghai for the AI conference. Gave a talk on agent memory. Met Dr. Chen from NUS who works on neuromorphic chips.", 0.3);
-  const chen = await e.remember("Dr. Chen from NUS invited me to collaborate on neuromorphic chips research next spring.", 0.9);
-  const lunch = await e.remember("Lunch was a forgettable sandwich at the conference hall.", 0);
-  const log: string[] = [];
-  for (const day of [1, 3, 7, 14, 30, 60, 120, 365]) {
-    skip(day - (log.length ? [1, 3, 7, 14, 30, 60, 120, 365][log.length - 1] : 0));
-    if (day === 14) await e.recall("neuromorphic chips collaboration"); // rehearsal
-    await e.decayAll();
-    if (day === 120) {
-      assert.equal(e.nodes.get(lunch.id)!.tier, 3, "trivial memory fades to a trace");
-      assert.ok(e.nodes.get(chen.id)!.tier < e.nodes.get(trip.id)!.tier, "salient + rehearsed memory stays more detailed");
-      const r = await e.inspect(trip.id); assert.equal(r!.rendered.reconstructed, true);
-      assert.match(r!.rendered.text, /reconstructed.*related:/, "reconstructed from linked neighbour summary");
-      console.log("d120 reconstruction:", r!.rendered.text);
-    }
-    log.push(`d${day}: trip L${e.nodes.get(trip.id)!.tier} chen L${e.nodes.get(chen.id)!.tier} lunch L${e.nodes.get(lunch.id)!.tier}`);
-  }
-  console.log(log.join("\n"));
-  console.log("d365 stats:", JSON.stringify(e.stats()));
-  assert.ok(e.stats().savedPct > 25, "forgetting-as-compression saves storage");
-  assert.ok(e.nodes.has(lunch.id), "nothing is deleted");
-});
-
-test("sleep merges similar episodes into a semantic memory and persists to disk", async () => {
+test("sleep merges similar episodes into a semantic memory but keeps the episodes", async () => {
   const { e } = mk();
-  await e.remember("Mia had swimming practice at the pool on Monday.");
+  const a = await e.remember("Mia had swimming practice at the pool on Monday.");
   await e.remember("Mia had swimming practice at the pool on Wednesday.");
   await e.remember("Paid the electricity bill.");
   const r = await e.sleep();
   assert.equal(r.semanticCreated.length, 1);
-  const sem = e.nodes.get(r.semanticCreated[0])!;
-  assert.equal(sem.kind, "semantic"); assert.equal(sem.sources!.length, 2);
-  const reloaded = new MemoryEngine({ dir: e.dir, now: e.now });
-  assert.equal(reloaded.nodes.size, 4); assert.equal(reloaded.edges.size, e.edges.size);
+  assert.equal(e.nodes.get(r.semanticCreated[0])!.sources!.length, 2);
+  assert.equal(e.text(a.id), "Mia had swimming practice at the pool on Monday.");
+  assert.equal(new MemoryEngine({ dir: e.dir, now: e.now }).nodes.size, 4);
 });

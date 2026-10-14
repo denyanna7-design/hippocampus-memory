@@ -8,15 +8,15 @@ input,button{background:#1f2937;color:#cde;border:1px solid #374151;padding:6px;
 <input id="c" placeholder="recall cue…"><button onclick="post('recall',{cue:c.value})">recall</button>
 <button onclick="post('sleep',{})">😴 sleep</button><button onclick="post('timeskip',{days:7})">⏩ +7 days</button>
 <pre id="st"></pre><pre id="out"></pre>
-<p>Tier colours: <span style="color:#60a5fa">L0 raw</span> · <span style="color:#a78bfa">L1 summary</span> · <span style="color:#f472b6">L2 gist</span> · <span style="color:#6b7280">L3 trace</span> · ◆ semantic</p></div>
+<p>Tier colours: <span style="color:#60a5fa">hot (plain)</span> · <span style="color:#a78bfa">warm (brotli)</span> · <span style="color:#f472b6">cool (delta/dedup)</span> · <span style="color:#6b7280">cold (packed)</span> · ◆ semantic</p></div>
 <script>
 const C=['#60a5fa','#a78bfa','#f472b6','#6b7280'];const nodes=new vis.DataSet(),edges=new vis.DataSet();
 const net=new vis.Network(g,{nodes,edges},{physics:{stabilization:false},nodes:{font:{color:'#cde'}},edges:{color:'#334155'}});
 async function refresh(){const d=await (await fetch('/api/graph')).json();
- nodes.update(d.nodes.map(n=>({id:n.id,label:n.label,shape:n.kind==='semantic'?'diamond':'dot',size:8+20*n.retention,color:C[n.tier]})));
+ nodes.update(d.nodes.map(n=>({id:n.id,label:n.label+'\n'+n.enc,shape:n.kind==='semantic'?'diamond':'dot',size:8+20*n.retention,color:C[n.tier]})));
  const ids=new Set(d.nodes.map(n=>n.id));nodes.getIds().filter(i=>!ids.has(i)).forEach(i=>nodes.remove(i));
  edges.clear();edges.add(d.edges.map(e=>({id:e.from+e.to,from:e.from,to:e.to,width:1+5*e.w})));
- st.textContent=JSON.stringify(await (await fetch('/api/stats')).json(),null,1);}
+ const S=await (await fetch('/api/stats')).json();st.style.color=S.overBudget?'#f87171':'';st.textContent=JSON.stringify(S,null,1);}
 async function post(p,b){const r=await (await fetch('/api/'+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})).json();out.textContent=JSON.stringify(r,null,1);refresh();}
 new EventSource('/api/events').onmessage=e=>{const ev=JSON.parse(e.data);if(ev.type!=='recall')return refresh();
  const a=ev.activation;nodes.update(Object.keys(a).map(id=>({id,color:{background:'#fde047',border:ev.winners.includes(id)?'#fff':'#fde047'},borderWidth:ev.winners.includes(id)?4:1,opacity:Math.max(.3,a[id])})));

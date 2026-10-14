@@ -11,21 +11,26 @@ import { summarizerFromEnv } from "./memory/providers.js";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 let offset = 0; // demo-only time travel (POST /api/timeskip)
 export const engine = new MemoryEngine({ dir: process.env.MEMORY_DIR ?? join(root, "data/memory"), now: () => Date.now() + offset, summarizer: summarizerFromEnv() });
-const json = (x: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(x, null, 2) }] });
+// Every tool result carries the budget alert (if any) so the agent/user is asked to decide; nothing is auto-deleted.
+const json = (x: unknown) => {
+  const content = [{ type: "text" as const, text: JSON.stringify(x, null, 2) }];
+  if (engine.meta.alert) content.push({ type: "text" as const, text: `⚠️ MEMORY BUDGET ALERT: ${engine.meta.alert.message}` });
+  return { content };
+};
 
 function buildServer() {
   const s = new McpServer({ name: "hippocampus-memory", version: "0.2.0" });
   s.registerTool("remember", { title: "Remember", description: "Store an episodic memory as a file-backed node. salience 0..1 (emotional/important memories fade slower).",
     inputSchema: { text: z.string(), salience: z.number().min(0).max(1).optional(), tags: z.array(z.string()).optional() } },
     async ({ text, salience, tags }) => { const n = await engine.remember(text, salience, tags); return json({ id: n.id, keywords: n.keywords, stability: n.stability }); });
-  s.registerTool("recall", { title: "Recall", description: "Activation-based recall: the cue lights up matching memories, activation spreads over associations, only memories above threshold are returned. Faded memories are reconstructed.",
+  s.registerTool("recall", { title: "Recall", description: "Activation-based recall: the cue lights up matching memories, activation spreads over associations, only memories above threshold are returned. Always returns the exact original text (losslessly decompressed); recalled memories move back to a warmer tier.",
     inputSchema: { cue: z.string(), k: z.number().int().min(1).max(20).optional() } },
     async ({ cue, k }) => json(await engine.recall(cue, k ?? 5)));
-  s.registerTool("sleep", { title: "Sleep / reflect", description: "Consolidation: replay recent episodes, merge similar ones into semantic memories, prune weak synapses, decay+compress.", inputSchema: {} },
+  s.registerTool("sleep", { title: "Sleep / reflect", description: "Consolidation: replay recent episodes, merge similar ones into semantic memories, prune weak synapses, move faded memories to colder LOSSLESS tiers (never deletes).", inputSchema: {} },
     async () => json(await engine.sleep()));
-  s.registerTool("memory_stats", { title: "Memory stats", description: "Counts per compression tier, bytes saved by forgetting-as-compression, mean retention.", inputSchema: {} },
+  s.registerTool("memory_stats", { title: "Memory stats", description: "Counts per compression tier, compression ratio, storage budget and over-budget alert.", inputSchema: {} },
     async () => json(engine.stats()));
-  s.registerTool("inspect", { title: "Inspect / forget preview", description: "Inspect one memory: retention, tier, neighbours and when it will compress to each next tier.", inputSchema: { id: z.string() } },
+  s.registerTool("inspect", { title: "Inspect / forget preview", description: "Inspect one memory: retention, tier, neighbours and when it will move to each colder (lossless) tier.", inputSchema: { id: z.string() } },
     async ({ id }) => json((await engine.inspect(id)) ?? { error: "not found" }));
   return s;
 }
