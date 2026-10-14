@@ -1,17 +1,33 @@
-// Minimal Alexa+ track MCP server: MCP spec 2025-11-25 over Streamable HTTP (stateless).
+// Brain-inspired memory MCP server (Alexa+ track): MCP 2025-11-25 over Streamable HTTP (stateless).
 import express from "express";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { MemoryEngine, DAY } from "./memory/engine.js";
+import { summarizerFromEnv } from "./memory/providers.js";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+let offset = 0; // demo-only time travel (POST /api/timeskip)
+export const engine = new MemoryEngine({ dir: process.env.MEMORY_DIR ?? join(root, "data/memory"), now: () => Date.now() + offset, summarizer: summarizerFromEnv() });
+const json = (x: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(x, null, 2) }] });
 
 function buildServer() {
-  const server = new McpServer({ name: "alexa-plus-hello", version: "0.1.0" });
-  server.registerTool(
-    "hello",
-    { title: "Say hello", description: "Greets a person by name", inputSchema: { name: z.string() } },
-    async ({ name }) => ({ content: [{ type: "text", text: `Hello, ${name}! Greetings from your Alexa+ MCP server.` }] })
-  );
-  return server;
+  const s = new McpServer({ name: "hippocampus-memory", version: "0.2.0" });
+  s.registerTool("remember", { title: "Remember", description: "Store an episodic memory as a file-backed node. salience 0..1 (emotional/important memories fade slower).",
+    inputSchema: { text: z.string(), salience: z.number().min(0).max(1).optional(), tags: z.array(z.string()).optional() } },
+    async ({ text, salience, tags }) => { const n = await engine.remember(text, salience, tags); return json({ id: n.id, keywords: n.keywords, stability: n.stability }); });
+  s.registerTool("recall", { title: "Recall", description: "Activation-based recall: the cue lights up matching memories, activation spreads over associations, only memories above threshold are returned. Faded memories are reconstructed.",
+    inputSchema: { cue: z.string(), k: z.number().int().min(1).max(20).optional() } },
+    async ({ cue, k }) => json(await engine.recall(cue, k ?? 5)));
+  s.registerTool("sleep", { title: "Sleep / reflect", description: "Consolidation: replay recent episodes, merge similar ones into semantic memories, prune weak synapses, decay+compress.", inputSchema: {} },
+    async () => json(await engine.sleep()));
+  s.registerTool("memory_stats", { title: "Memory stats", description: "Counts per compression tier, bytes saved by forgetting-as-compression, mean retention.", inputSchema: {} },
+    async () => json(engine.stats()));
+  s.registerTool("inspect", { title: "Inspect / forget preview", description: "Inspect one memory: retention, tier, neighbours and when it will compress to each next tier.", inputSchema: { id: z.string() } },
+    async ({ id }) => json((await engine.inspect(id)) ?? { error: "not found" }));
+  return s;
 }
 
 const app = express();
@@ -24,5 +40,18 @@ app.post("/mcp", async (req, res) => {
   await transport.handleRequest(req, res, req.body);
 });
 app.get("/health", (_req, res) => { res.json({ ok: true }); });
+// --- visualization + demo helpers ---
+app.use(express.static(join(root, "public")));
+app.get("/api/graph", (_req, res) => { res.json(engine.graph()); });
+app.get("/api/stats", (_req, res) => { res.json(engine.stats()); });
+app.post("/api/remember", async (req, res) => { res.json(await engine.remember(req.body.text, req.body.salience, req.body.tags)); });
+app.post("/api/recall", async (req, res) => { res.json(await engine.recall(req.body.cue, req.body.k ?? 5)); });
+app.post("/api/sleep", async (_req, res) => { res.json(await engine.sleep()); });
+app.post("/api/timeskip", async (req, res) => { offset += Number(req.body.days ?? 1) * DAY; res.json({ days: offset / DAY, changes: await engine.decayAll() }); });
+app.get("/api/events", (req, res) => {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const off = engine.on(ev => res.write(`data: ${JSON.stringify(ev)}\n\n`));
+  req.on("close", off);
+});
 const port = Number(process.env.PORT ?? 3000);
-app.listen(port, () => console.log(`MCP server on http://localhost:${port}/mcp`));
+app.listen(port, () => console.log(`MCP server on http://localhost:${port}/mcp · brain view http://localhost:${port}/`));

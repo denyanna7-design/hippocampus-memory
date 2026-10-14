@@ -4,10 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tsx src/client-test.ts",
+    "test": "tsx --test test/*.test.ts",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx src/client-test.ts"
   },
   "keywords": [],
   "author": "",
