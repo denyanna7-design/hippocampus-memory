@@ -26,8 +26,10 @@ function buildServer() {
   s.registerTool("recall", { title: "Recall", description: "Activation-based recall: the cue lights up matching memories, activation spreads over associations, only memories above threshold are returned. Always returns the exact original text (losslessly decompressed); recalled memories move back to a warmer tier.",
     inputSchema: { cue: z.string(), k: z.number().int().min(1).max(20).optional() } },
     async ({ cue, k }) => json(await engine.recall(cue, k ?? 5)));
-  s.registerTool("sleep", { title: "Sleep / reflect", description: "Consolidation: replay recent episodes, merge similar ones into semantic memories, prune weak synapses, move faded memories to colder LOSSLESS tiers (never deletes).", inputSchema: {} },
-    async () => json(await engine.sleep()));
+  s.registerTool("sleep", { title: "Sleep / consolidate", description: "Consolidation pass: form schema (prototype) memories from similar episodes, train the zstd dictionary, then move faded memories to colder tiers (hot/warm lossless; cool/cold schema+residual with fidelity floors). Returns a per-tier report: target ratio, expected, actual, bytes, fidelity, algorithms, moves. Never deletes.", inputSchema: {} },
+    async () => { const r = await engine.sleep(); return json({ report: r.text, totals: r.totals, moves: r.moves, tiers: r.tiers.map(t => ({ tier: t.tier, target: t.target, floor: t.floor, expected: t.expected.ratio, after: t.after.ratio, fidelity: t.after.fidelity, algorithms: t.after.algorithms })) }); });
+  s.registerTool("compress_preview", { title: "Compression preview (dry run)", description: "Show what the next compression pass would do: expected per-tier ratios, fidelity and moves. Writes nothing.", inputSchema: {} },
+    async () => { const r = await engine.sleep({ dryRun: true }); return json({ report: r.text, totals: r.totals, moves: r.moves }); });
   s.registerTool("memory_stats", { title: "Memory stats", description: "Counts per compression tier, compression ratio, storage budget and over-budget alert.", inputSchema: {} },
     async () => json(engine.stats()));
   s.registerTool("inspect", { title: "Inspect / forget preview", description: "Inspect one memory: retention, tier, neighbours and when it will move to each colder (lossless) tier.", inputSchema: { id: z.string() } },
@@ -52,7 +54,8 @@ app.get("/api/stats", (_req, res) => { res.json(engine.stats()); });
 app.post("/api/remember", async (req, res) => { res.json(await engine.remember(req.body.text, req.body.salience, req.body.tags)); });
 app.post("/api/recall", async (req, res) => { res.json(await engine.recall(req.body.cue, req.body.k ?? 5)); });
 app.post("/api/sleep", async (_req, res) => { res.json(await engine.sleep()); });
-app.post("/api/timeskip", async (req, res) => { offset += Number(req.body.days ?? 1) * DAY; res.json({ days: offset / DAY, changes: await engine.decayAll() }); });
+app.post("/api/timeskip", async (req, res) => { offset += Number(req.body.days ?? 1) * DAY; const r = await engine.pass(); res.json({ days: offset / DAY, report: r.text }); });
+app.get("/api/preview", async (_req, res) => { res.type("text").send((await engine.sleep({ dryRun: true })).text); });
 app.get("/api/events", (req, res) => {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   const off = engine.on(ev => res.write(`data: ${JSON.stringify(ev)}\n\n`));

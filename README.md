@@ -1,5 +1,7 @@
 # Hippocampus — brain-inspired memory MCP server for Alexa+
 
+> Node ≥ 22.15 required (zstd). On the box: `export PATH=$HOME/.local/node22/bin:$PATH`.
+
 Agents usually "remember" by stuffing logs into the context window. Hippocampus stores memories as **files**, recalls them by **spreading activation** like a brain, and lets memories **fade without ever losing them**. Decay only lowers how easily a memory is recalled and moves its raw bytes to colder, **losslessly** compressed storage. Every memory can always be recovered byte-for-byte, and each read is checked against its sha256.
 
 Built for the Amazon Developer Hackathon (Alexa+ track). Runs as an MCP server, spec 2025-11-25, over Streamable HTTP. No API keys are needed.
@@ -18,31 +20,45 @@ Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/e
 ```
 
 ## Algorithms
+### Recall: brain-like dynamics
 | Mechanism | Formula / rule |
 |---|---|
-| Forgetting curve (power law, FSRS-style) | `R(t) = (1 + t / (9·S))⁻¹`, where t is days since last access and S is stability in days |
-| Salience at encoding | `S₀ = 1 · (1 + 3·salience)` |
-| Cue seeding | `aᵢ = cos(cue, i) · (0.5 + 0.5·Rᵢ)`, then normalised by `max(maxⱼ aⱼ, 0.5)` |
-| Spreading activation | per hop (2 hops): `aⱼ += Σᵢ aᵢ · wᵢⱼ · δ`, δ = 0.7, capped at 1 |
-| Retrieval | return the top-k nodes with `a ≥ θ` (θ = 0.1) |
-| Spacing effect (retrieval strengthens) | `S += S · g · (1 − R) · (1 + salience) · a + 0.1`, g = 1.5 (bigger gain when the memory was nearly forgotten) |
-| Hebbian learning | for co-recalled i, j: `wᵢⱼ += η · aᵢ · aⱼ · (1 − wᵢⱼ)`, η = 0.2 |
-| Association at encoding | `w = cos(new, old)` if ≥ 0.15; temporal link to the previous episode `w ≥ 0.25` |
-| Decay = colder *lossless* storage | R ≥ 0.6 → **hot** (stored as-is, fastest) · R ≥ 0.35 → **warm** (fast codecs: brotli-4 / deflate-6 / zstd-3, plus chunk dedup and delta) · R ≥ 0.15 → **cool** (max codecs: brotli-11 / deflate-9 / zstd-19, plus dedup and delta) · else **cold** (all cold memories packed into one archive, compressed with the smallest of the cold codecs). Each tier tries every candidate and keeps the **smallest** output. The algorithm used is recorded per node (`enc`). |
-| Delta encoding | raw-deflate with the most similar memory's raw bytes as a preset dictionary (LZ77 back-references into it). Chains are kept to depth 1: a base is never itself a delta, and a memory that others depend on never becomes one. |
-| Chunk dedup | content-defined chunks split at sentence and line boundaries, stored by sha256 in `chunks/`; shared passages are stored once |
-| Integrity | the new encoding is written and verified (sha256) **before** the old copy is removed; every read is checked |
-| Index layers | a summary (extractive, or from an LLM) and keywords are *added* once a memory leaves the hot tier. The raw text is never replaced. |
-| Recall | always returns the exact original text; a recalled memory warms back up to the warm tier (reconsolidation) |
-| Budget | `MEMORY_BUDGET_BYTES`. When exceeded, the weakest memories are pushed to cool, then cold. If the store is still over budget, the server **raises an alert** instead of deleting: `memory_stats.overBudget` and `.alert` are set, a ⚠️ line is appended to every MCP tool result, and the alert is logged once. The user decides what happens next. |
-| Sleep | replay unconsolidated episodes → strengthen similar pairs (+0.1) → merge clusters (cos ≥ 0.55) into **semantic** nodes (S = 4·n, linked to their sources at 0.8) → synaptic homeostasis (`w *= 0.95`, floor 0.05, no pruning) → move faded memories to colder lossless tiers. Episodes are kept alongside the semantic node. |
+| Forgetting curve (power law) | `R(t) = (1 + t/(9·S))⁻¹`, where t is days since last access and S is stability |
+| Salience | `S₀ = 1 + 3·salience`. Salience ≥ 0.7 ⇒ the memory is **always lossless** |
+| Spreading activation | seed `aᵢ = cos(cue,i)·(0.5+0.5Rᵢ)` (normalised), then 2 hops of `aⱼ += aᵢ·wᵢⱼ·0.7`; return the top-k with `a ≥ 0.1` |
+| Spacing effect | `S += S·1.5·(1−R)·(1+salience)·a + 0.1` |
+| Hebbian | `wᵢⱼ += 0.2·aᵢ·aⱼ·(1−wᵢⱼ)` |
 
-`memory_stats` reports `compressionRatio` and a `perTier` table: raw vs. stored bytes, ratio, and algorithm counts per tier. Shared chunks are split by refcount and the pack is split by raw share. `inspect` previews `t = 9S(1/R* − 1)` days until each colder tier. Codecs are pluggable via `registerCodec()` / `TIER_CODECS` in `src/memory/rawstore.ts`: add lz4, xz, or zstd with a trained dictionary there. zstd turns on automatically on Node ≥ 22.15.
+### Storage: graded tiers, picked by retention R and re-planned on every `sleep()`
+| Tier | R | Fidelity | Target ratio | How (each tier tries every candidate; smallest output wins; algorithm recorded per node) |
+|---|---|---|---|---|
+| hot | ≥ 0.6 | lossless | 1–2x | stored as-is or LZ4 (fast access) |
+| warm | ≥ 0.35 | lossless | 2.5–4x | zstd-3 / brotli-5 / LZ4, zstd with a **trained dictionary**, **delta** (zstd/deflate with a similar memory as dictionary), **chunk dedup** |
+| cool | ≥ 0.15 | ROUGE-L ≥ 0.90 | 5–8x | **schema + residual** in a shared archive. Low-importance residual details are dropped down to the floor. Archive codec: zstd-19(+dict) / brotli-11 / LZMA-9 / deflate-9 |
+| cold | < 0.15 | ROUGE-L ≥ 0.65 | 8–15x | schema + **key residuals** (gist) in a shared archive, LZMA-9 / zstd-19(+dict) / brotli-11 |
+
+**Why these targets.** Agent memories are short: about 50–600 B, about 165 B on average in our corpus. On text that short, per-object codec overhead dominates. That is why warm relies on a trained dictionary and delta, and why cool/cold share an archive. The 8–15x / 20–50x targets suggested at the start only make sense for multi-KB documents. The targets above match what the realistic corpus actually reaches (see the tests).
+
+**Schema consolidation (mammal-like).** During `sleep()`, lossless episodes with cosine similarity ≥ 0.35 cluster together (minimum 3). The medoid is copied into a pinned, always-lossless **schema** memory. Each member is then stored as a token-level diff against it (hunks `[pos, del, insert]`). Hunks are ordered by importance: digits ×3, capitalised words ×2, CJK ×1.5, other text ×1, divided by size. Greedy selection keeps the fewest hunks that reach the tier's ROUGE-L floor; cold keeps at least one key residual. Dropped details revert to the schema's wording, which is the same "filling in" human recall does.
+
+**Guarantees.**
+1. Nothing is ever deleted.
+2. Every memory can always be reconstructed: schemas are pinned lossless, and every read is integrity-checked with sha256 (of the original for lossless memories, of the reconstruction for lossy ones).
+3. A memory's measured fidelity is never below its tier floor. Fidelity is computed against the original at compression time and stored per node.
+4. High-salience memories, delta bases and memories without a schema stay byte-exact.
+5. A lossy memory never "warms" back up. A recalled lossless memory returns to the warm tier.
+
+**Budget.** `MEMORY_BUDGET_BYTES`. When exceeded, the weakest memories are forced down to cool, then cold (fidelity floors still apply). If the store is still over budget, the server raises an **alert** instead of deleting: `memory_stats.overBudget`/`alert` are set, a ⚠️ line is appended to every MCP tool result, and the alert is logged once.
+
+**Compression report.** Every pass (`sleep`, time-skip, budget enforcement) produces a per-tier report with: target ratio and fidelity floor, before / expected (planned) / after for nodes, raw→stored bytes, ratio, ROUGE-L mean and minimum, char similarity, algorithms used, and moves. It is returned by `sleep`, stored in `memory_stats.lastReport`, and appended to `data/memory/compaction.log` as text plus a JSON line. `compress_preview` (or `GET /api/preview`) is a dry run that writes nothing. It doesn't form new schemas; those are created at the start of a real `sleep`.
+
+Codecs are registered in `src/memory/codecs.ts` (`registerCodec`, `TIER_CODECS`). Requires Node ≥ 22.15 for zstd (`.nvmrc` pins 22.23.3). LZ4 comes from `lz4-napi`; LZMA from the pure-JS `lzma` package. `lzma-native` was tried, but its synchronous mode did not flush output, so it was dropped.
 
 ## MCP tools
 - `remember(text, salience?, tags?)`
 - `recall(cue, k?)`
-- `sleep()`
+- `sleep()`: returns the compression report
+- `compress_preview()`: dry-run report
 - `memory_stats()`
 - `inspect(id)`
 
