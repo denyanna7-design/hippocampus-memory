@@ -15,3 +15,6 @@ submission/video/work3/*
 submission/video/work4/*
 !submission/video/work4/record.py
 !submission/video/work4/build.py
+submission/video/work5/*
+!submission/video/work5/record.py
+!submission/video/work5/build.py

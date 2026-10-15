@@ -68,7 +68,7 @@ function spread(a,winners){lit=new Set(winners);const t0=performance.now();const
  while(fr.length&&hop<3){const nx=[];for(const f of fr)for(const j of adj(f)){if(when[j]!==undefined||(hop>0&&a[j]===undefined))continue;when[j]=(hop+1)*700;nx.push(j);
    for(let k=0;k<3;k++)parts.push({from:f,to:j,t0:t0+hop*700+k*90,ms:700,trail:[],hot:a[j]!==undefined})}fr=nx.slice(0,40);hop++}
  for(const[id,t]of Object.entries(when))setTimeout(()=>{const n=N.get(id);if(!n)return;n.flash=1;bursts.push({x:n.x,y:n.y,t0:performance.now(),c:[253,224,71],ms:1000})},t);
- const top=N.get(act[0][0]);cam.tx=top.x;cam.ty=top.y;cam.tz=Math.min(2.4,cam.z*1.7);
+ const top=N.get(act[0][0]);cam.tx=top.x;cam.ty=top.y+20;cam.tz=Math.min(2.1,cam.z*1.5);
  setTimeout(()=>{lit=new Set();fit();refresh()},9000)}
 // ---------- render ----------
 let last=performance.now();
@@ -98,9 +98,20 @@ function frame(now){const dt=Math.min(50,now-last);last=now;if(!busyLayout)tick(
  for(const n of N.values()){const c=lit.has(n.id)||n.flash>0?n.c.map((v,i)=>lerp(v,[253,224,71][i],Math.max(lit.has(n.id)?.85:0,n.flash))):n.c;const R=n.r*(1+.6*n.flash);X.fillStyle=rgb(c);X.beginPath();
   if(n.m.kind==='semantic'){X.moveTo(n.x,n.y-R*1.3);X.lineTo(n.x+R*1.3,n.y);X.lineTo(n.x,n.y+R*1.3);X.lineTo(n.x-R*1.3,n.y);X.closePath()}else X.arc(n.x,n.y,R,0,7);X.fill();
   if(lit.has(n.id)){X.strokeStyle='#fff';X.lineWidth=2.5/cam.z;X.stroke()}
-  if(label(n)||hover===n){X.font=`${12/cam.z*1.1}px system-ui`;X.textAlign='center';X.lineWidth=3/cam.z;X.strokeStyle='rgba(4,6,11,.9)';const tx=n.m.label;X.strokeText(tx,n.x,n.y+R+14/cam.z);X.fillStyle=lit.has(n.id)?'#fef9c3':'#cbd5e1';X.fillText(tx,n.x,n.y+R+14/cam.z)}}
- if(hover){X.font=`${11/cam.z}px system-ui`;X.fillStyle='#94a3b8';X.textAlign='center';X.fillText(`${hover.m.enc} · retention ${hover.m.retention}${hover.m.lossy?' · lossy':''}`,hover.x,hover.y+hover.r+28/cam.z)}
- X.restore();requestAnimationFrame(frame)}
+}
+ X.restore();drawLabels();requestAnimationFrame(frame)}
+// ---------- labels: screen space, priority order, collision avoidance, safe area ----------
+const SAFE={top:36,bottom:112,side:10};
+function drawLabels(){const zoomed=lit.size>0;const cand=[];
+ for(const n of N.values()){let pr=hover===n?5:lit.has(n.id)?4:0;if(!zoomed&&!pr)pr=n.m.salience>=.7?2:n.m.kind==='semantic'?1:0;if(!pr)continue;cand.push({n,pr})}
+ cand.sort((a,b)=>b.pr-a.pr||b.n.r-a.n.r);const placed=[];X.font='600 13px system-ui';X.textBaseline='middle';
+ const hit=r=>r.x<SAFE.side||r.x+r.w>W-SAFE.side||r.y<SAFE.top||r.y+r.h>H-SAFE.bottom||placed.some(q=>r.x<q.x+q.w&&r.x+r.w>q.x&&r.y<q.y+q.h&&r.y+r.h>q.y);
+ for(const {n,pr} of cand){const sx=(n.x-cam.x)*cam.z+W/2,sy=(n.y-cam.y)*cam.z+H/2,R=n.r*cam.z;const t=n.m.label;const w=X.measureText(t).width+12,h=20;
+  const opts=[[sx-w/2,sy+R+4],[sx-w/2,sy-R-4-h],[sx+R+6,sy-h/2],[sx-R-6-w,sy-h/2]];let r=null;
+  for(const [x,y] of opts){const q={x,y,w,h};if(!hit(q)){r=q;break}}if(!r)continue;placed.push(r);
+  X.fillStyle=pr>=4?'rgba(40,32,4,.78)':'rgba(4,6,11,.72)';X.beginPath();X.roundRect(r.x,r.y,r.w,r.h,6);X.fill();
+  X.fillStyle=pr>=4?'#fef9c3':'#cbd5e1';X.textAlign='center';X.fillText(t,r.x+r.w/2,r.y+h/2+.5);
+  if(hover===n){X.font='11px system-ui';X.fillStyle='#94a3b8';X.fillText(`${n.m.enc} · retention ${n.m.retention}${n.m.lossy?' · lossy':''}`,r.x+r.w/2,r.y+h+9);X.font='600 13px system-ui'}}}
 let busyLayout=false;requestAnimationFrame(frame);
 cv.addEventListener('mousemove',ev=>{const x=(ev.offsetX-W/2)/cam.z+cam.x,y=(ev.offsetY-H/2)/cam.z+cam.y;hover=null;for(const n of N.values())if(Math.hypot(n.x-x,n.y-y)<n.r+4)hover=n});
 // ---------- HUD: byte counter + morphing per-tier bars ----------

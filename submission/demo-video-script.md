@@ -64,3 +64,6 @@ Rehearse once with `DEMO_PACE=0 npm run alexa:demo:video` to warm caches. Then r
 - **Reproducible.** Everything is captured with `DEMO_EPOCH=1793750400000` from one deterministic run. The shot 8 terminal and the browser come from the same server and state, and both show 5630 B against the 5000 B budget.
 - **Brain view.** It uses the new canvas renderer: particle-trail pulses, camera zoom, sleep replay, fold and condense, the morphing tier bars, and a tier gradient legend.
 - **Video effects.** Kinetic word-by-word captions are injected into each page, there are 0.6 s transitions between shots, and the end card is animated with a QR code to the repo.
+
+## v5 (demo-v5.mp4, 2:22.7)
+Zoom labels with collision avoidance + safe area; QR decoded from final frame; no white/black flash transitions; loudnorm -16 LUFS (measured -16.4, TP -1.4 dBFS); larger terminal font; calmer captions.
