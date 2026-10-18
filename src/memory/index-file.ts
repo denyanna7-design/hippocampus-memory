@@ -21,7 +21,12 @@ const hex = (b?: string) => b ? Buffer.from(b, "base64").toString("hex") : undef
 function packNode(n: MemoryNode, derivableVector: boolean): Record<string, unknown> {
   const o: Record<string, unknown> = { ...n };
   delete o.keywords; delete o.members; delete o.summary; // derivable: members from each node's `schema`, summary from text
-  if (n.keeps) { const k = n.keeps; o.keeps = [k.cool, k.cold, k.total, k.fidCool.rouge, k.fidCool.char, k.fidCold.rouge, k.fidCold.char]; }
+  if (n.keeps) {
+    const k = n.keeps;
+    const row: (number | null)[] = [k.cool, k.cold, k.total, k.fidCool.rouge, k.fidCool.char, k.fidCold.rouge, k.fidCold.char];
+    if (k.fidCool.semantic !== undefined || k.fidCold.semantic !== undefined) row.push(k.fidCool.semantic ?? null, k.fidCold.semantic ?? null);
+    o.keeps = row;
+  }
   if (derivableVector) delete o.vector; else o.vector = Object.entries(n.vector).map(([k, w]) => (q2(w) === 1 ? k : `${k}:${q2(w)}`)).join(" ");
   // integrity tag: only the hash that readRaw() verifies is needed (original for lossless, reconstruction for lossy),
   // truncated to 64 bits — ample for corruption/tamper detection of a few-hundred-byte blob.
@@ -38,7 +43,7 @@ function packNode(n: MemoryNode, derivableVector: boolean): Record<string, unkno
 }
 function unpackNode(o: Record<string, any>): MemoryNode {
   const vector: Record<string, number> = {}; const k = o.keeps;
-  if (Array.isArray(k)) o.keeps = { cool: k[0], cold: k[1], total: k[2], fidCool: { rouge: k[3], char: k[4] }, fidCold: { rouge: k[5], char: k[6] } };
+  if (Array.isArray(k)) o.keeps = { cool: k[0], cold: k[1], total: k[2], fidCool: { rouge: k[3], char: k[4], ...(typeof k[7] === "number" ? { semantic: k[7] } : {}) }, fidCold: { rouge: k[5], char: k[6], ...(typeof k[8] === "number" ? { semantic: k[8] } : {}) } };
   for (const t of String(o.vector ?? "").split(" ").filter(Boolean)) { const i = t.lastIndexOf(":"); if (i > 0 && !isNaN(+t.slice(i + 1))) vector[t.slice(0, i)] = +t.slice(i + 1); else vector[t] = 1; }
   const n = { ...o, vector, kind: o.kind ?? "episodic", tier: o.tier ?? 0, sha256: o.lossy ? "" : hex(o.h)!, reconSha: o.lossy ? hex(o.h) : undefined, createdAt: o.createdAt * 1000 + T0, fid: o.fid ?? { rouge: 1, char: 1 }, tags: o.tags ?? [],
     lossy: !!o.lossy, lastAccess: o.createdAt * 1000 + T0 + (o.lastAccess ?? 0) * 1000, accessCount: o.accessCount ?? 0 } as MemoryNode;

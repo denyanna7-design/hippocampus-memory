@@ -40,6 +40,32 @@ function importance(ins: string, del: number): number {
 }
 
 const content = (t: string) => xtok(t).filter(x => !/^\s+$/.test(x));
+/** Surface-token Jaccard. Independent of the stemmed TF vector used for cosine. */
+export function tokenOverlap(a: string, b: string): number {
+  const A = new Set(content(a)), B = new Set(content(b));
+  if (!A.size && !B.size) return 1; if (!A.size || !B.size) return 0;
+  let inter = 0; for (const t of A) if (B.has(t)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+/** Character-trigram Jaccard. Cheap char overlap for schema membership (compression still uses `charSim`). */
+export function charOverlap(a: string, b: string): number {
+  const grams = (s: string) => {
+    const g = new Set<string>(); const t = s.toLowerCase();
+    if (t.length < 3) { if (t) g.add(t); return g; }
+    for (let i = 0; i + 3 <= t.length; i++) g.add(t.slice(i, i + 3));
+    return g;
+  };
+  const A = grams(a), B = grams(b);
+  if (!A.size && !B.size) return 1; if (!A.size || !B.size) return 0;
+  let inter = 0; for (const t of A) if (B.has(t)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+/** How much of `text` the schema already reconstructs with no residual hunks. */
+export function residualFidelity(schema: string, text: string): number { return rougeL(text, schema); }
+/** Second schema signal: token overlap, char overlap, or residual-plan fidelity — whichever is strongest. */
+export function schemaSecondScore(schema: string, text: string): number {
+  return Math.max(tokenOverlap(schema, text), charOverlap(schema, text), residualFidelity(schema, text));
+}
 /** ROUGE-L F1 over content tokens. */
 export function rougeL(ref: string, hyp: string): number {
   const a = content(ref), b = content(hyp);
@@ -55,15 +81,36 @@ export function charSim(a: string, b: string): number {
   return 1 - prev[m] / Math.max(n, m);
 }
 
-/** Order hunks by importance and find how many are needed to reach each fidelity floor.
- *  Dropped hunks revert to the schema's wording — schema-based "filling in", as in human recall. */
-export function plan(schema: string, text: string, floors: number[]) {
+export interface FloorSpec { rouge: number; char?: number; semantic?: number }
+export type Floor = number | FloorSpec;
+export interface Fid { rouge: number; char: number; semantic?: number }
+function normalizeFloor(f: Floor): { rouge: number; char: number; semantic?: number } {
+  if (typeof f === "number") return { rouge: f, char: f }; // a bare tier floor gates ROUGE-L and char similarity together
+  return { rouge: f.rouge, char: f.char ?? f.rouge, semantic: f.semantic };
+}
+/** Order hunks by importance and find how many are needed to clear every fidelity gate.
+ *  A keep count is accepted only when ROUGE-L and char similarity both clear the tier floor
+ *  (and semantic similarity, when a floor and scorer are given). Dropped hunks revert to the
+ *  schema's wording — schema-based "filling in", as in human recall. */
+export function plan(schema: string, text: string, floors: Floor[], semantic?: (hyp: string) => number) {
   const all = diff(schema, text).sort((x, y) => y.s - x.s || x.p - y.p);
-  const keeps = floors.map(f => {
-    for (let k = 0; k <= all.length; k++) if (rougeL(text, apply(schema, all.slice(0, k))) >= f) return k;
-    return all.length;
-  });
-  return { hunks: all, keeps, fid: keeps.map(k => { const r = apply(schema, all.slice(0, k)); return { rouge: rougeL(text, r), char: charSim(text, r) }; }) };
+  const spec = floors.map(normalizeFloor);
+  const keeps = spec.map(() => all.length);
+  const fidAt: Fid[] = spec.map(() => ({ rouge: 0, char: 0 }));
+  const accepted = spec.map(() => false);
+  for (let k = 0; k <= all.length && accepted.some(ok => !ok); k++) {
+    const hyp = apply(schema, all.slice(0, k));
+    const fid: Fid = { rouge: rougeL(text, hyp), char: charSim(text, hyp) };
+    if (semantic) fid.semantic = semantic(hyp);
+    spec.forEach((f, i) => {
+      if (accepted[i]) return;
+      const semOk = f.semantic === undefined || (semantic !== undefined && (fid.semantic ?? 0) >= f.semantic);
+      if ((fid.rouge >= f.rouge && fid.char >= f.char && semOk) || k === all.length) {
+        keeps[i] = k; fidAt[i] = fid; accepted[i] = true;
+      }
+    });
+  }
+  return { hunks: all, keeps, fid: fidAt };
 }
 /** Compact on-disk form: [[p,d,"i"],...] in importance order (score not stored; order is enough). */
 export const packHunks = (h: Hunk[]) => Buffer.from(JSON.stringify(h.map(x => x.d ? [x.p, x.d, x.i] : [x.p, x.i])));

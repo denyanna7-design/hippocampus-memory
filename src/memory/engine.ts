@@ -1,8 +1,12 @@
 // Brain-inspired memory engine.
 //  Recall: spreading activation over a weighted association graph (Hebbian learning, spacing effect, salience).
+//  Spread continues while frontier additions stay above epsilon, with a max-hop ceiling (not a fixed 2-hop walk).
+//  Sleep decays edge weights toward a soft floor by elapsed retention-ticks: explicit cap, slow falloff.
 //  Storage: graded tiers chosen by retention R. hot/warm are lossless; cool/cold store a memory as
 //  schema (prototype) + importance-ordered residual diffs and may drop low-importance residual details,
-//  but never below a measured fidelity floor, never for high-salience memories, and never deleting anything.
+//  but only when ROUGE-L, char similarity, and (cool/cold) local-embedding cosine all clear their floors.
+//  Schema membership is permanent only after a near dual-check; near-misses stay provisional.
+//  Nothing is ever deleted.
 import { mkdirSync, readdirSync, readFileSync, existsSync, statSync, appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -12,16 +16,16 @@ import { Embedder, Summarizer, localEmbedder, extractiveSummarizer } from "./pro
 import { RawStore, Enc, sha, chunk, fileOf } from "./rawstore.js";
 import { codec, codecsFor, trainDictionary, dictId, Codec } from "./codecs.js";
 import { readIndex, writeIndex, HASH_HEX, sparsify } from "./index-file.js";
-import { plan as residPlan, apply, Hunk, rougeL, charSim, packHunks, unpackHunks } from "./residual.js";
+import { plan as residPlan, apply, Hunk, rougeL, charSim, packHunks, unpackHunks, schemaSecondScore, type Fid } from "./residual.js";
 
 export type Tier = 0 | 1 | 2 | 3;
 export const TIER_NAMES = ["hot", "warm", "cool", "cold"] as const;
 /** Graded tier targets. Ratio = raw bytes / stored bytes (schema storage amortised over its members). */
 export const TIERS = [
-  { name: "hot",  lossless: true,  floor: 1.0,  target: [1, 2],   why: "fast access: stored as-is or LZ4" },
-  { name: "warm", lossless: true,  floor: 1.0,  target: [2.5, 4],   why: "zstd/brotli + trained dictionary, delta vs similar memory, chunk dedup" },
-  { name: "cool", lossless: false, floor: 0.9,  target: [5, 8],   why: "schema + residual in a shared archive; drop low-importance residual details, ROUGE-L ≥ 0.90" },
-  { name: "cold", lossless: false, floor: 0.65, target: [8, 15],  why: "schema + key residuals in a shared archive (xz/zstd-19/brotli-11), ROUGE-L ≥ 0.65" },
+  { name: "hot",  lossless: true,  floor: 1.0,  charFloor: 1,    semanticFloor: 1,   target: [1, 2],   why: "fast access: stored as-is or LZ4" },
+  { name: "warm", lossless: true,  floor: 1.0,  charFloor: 1,    semanticFloor: 1,   target: [2.5, 4], why: "zstd/brotli + trained dictionary, delta vs similar memory, chunk dedup" },
+  { name: "cool", lossless: false, floor: 0.9,  charFloor: 0.85, semanticFloor: 0.8, target: [5, 8],   why: "schema + residual; keep a lossy encode only when ROUGE-L ≥ 0.90, char similarity ≥ 0.85, and local-embedding cosine ≥ 0.80" },
+  { name: "cold", lossless: false, floor: 0.65, charFloor: 0.65, semanticFloor: 0.5, target: [8, 15],  why: "schema + key residuals; ROUGE-L ≥ 0.65, char similarity ≥ 0.65, and local-embedding cosine ≥ 0.50" },
 ] as const;
 export const SALIENT = 0.7; // salience ≥ this ⇒ always lossless
 
@@ -30,9 +34,11 @@ export interface MemoryNode {
   tier: Tier; enc: Enc;
   sha256: string; rawBytes: number;   // of the ORIGINAL bytes
   lossy?: boolean; reconSha?: string; // when lossy: hash of the reconstruction (integrity)
-  fid: { rouge: number; char: number }; // fidelity of what is stored vs the original (1 = exact)
-  keeps?: { cool: number; cold: number; total: number; fidCool: { rouge: number; char: number }; fidCold: { rouge: number; char: number } };
-  schema?: string; pinned?: boolean; members?: string[];
+  fid: Fid; // fidelity of what is stored vs the original (1 = exact). semantic is local-embedding cosine when lossy.
+  keeps?: { cool: number; cold: number; total: number; fidCool: Fid; fidCold: Fid };
+  schema?: string; // set only after the near dual-check passes
+  schemaHold?: string; // provisional schema id; re-checked on later sleep, never lossy
+  pinned?: boolean; members?: string[];
   summary?: string; keywords: string[]; vector: Record<string, number>;
   salience: number; stability: number; createdAt: number; lastAccess: number; accessCount: number; tags: string[];
 }
@@ -40,17 +46,55 @@ export interface RecallHit { id: string; activation: number; tier: Tier; storage
 export interface BudgetAlert { level: "over_budget"; message: string; totalBytes: number; budgetBytes: number; at: number; }
 
 export const DAY = 86_400_000;
-export const P = { baseStability: 1, tierRetention: [0.6, 0.35, 0.15] as const, hopDecay: 0.7, hops: 2, threshold: 0.1, minCueSim: 0.05,
-  hebbRate: 0.2, linkSim: 0.15, temporalLink: 0.25, schemaSim: 0.35, schemaMin: 3, spacingGain: 1.5, coldKeyResiduals: 1 };
+export const P = { baseStability: 1, tierRetention: [0.6, 0.35, 0.15] as const, hopDecay: 0.7, maxHops: 8, spreadEpsilon: 0.01, threshold: 0.1, minCueSim: 0.05,
+  hebbRate: 0.2, linkSim: 0.15, temporalLink: 0.25, schemaSim: 0.35, schemaNear: 0.25, schemaLex: 0.2, schemaLexNear: 0.12, schemaMin: 3, spacingGain: 1.5, coldKeyResiduals: 1,
+  edgeCap: 1, edgeFloor: 0.05, edgeHalfLifeDays: 60 };
+export type SchemaLink = "permanent" | "provisional" | "reject";
+/** Permanent only when vector similarity and the lexical/residual signal both clear. A one-sided or near miss stays provisional. */
+export function schemaVerdict(similarity: number, second: number): SchemaLink {
+  const simOk = similarity >= P.schemaSim, secOk = second >= P.schemaLex;
+  if (simOk && secOk) return "permanent";
+  if (simOk || secOk || (similarity >= P.schemaNear && second >= P.schemaLexNear)) return "provisional";
+  return "reject";
+}
+/** Time-aware edge decay. `elapsedMs` is measured in retention ticks (days). Weight approaches `edgeFloor` asymptotically (no hard snap) and never exceeds `edgeCap`. */
+export function decayEdgeWeight(w: number, elapsedMs: number): number {
+  const cap = P.edgeCap, floor = P.edgeFloor;
+  const clamped = Math.min(cap, Math.max(0, w));
+  if (!(elapsedMs > 0) || clamped <= floor) return clamped;
+  const ticks = elapsedMs / DAY;
+  const keep = Math.exp(-Math.LN2 * ticks / P.edgeHalfLifeDays);
+  return floor + (clamped - floor) * keep;
+}
+/** Spread until a hop adds nothing ≥ epsilon, or `maxHops` is hit. Mutates `act`. Returns hops actually taken. */
+export function spreadActivation(act: Map<string, number>, neighbors: (id: string) => Iterable<[string, number]>, allow: (id: string) => boolean, opts?: { hopDecay?: number; epsilon?: number; maxHops?: number }): number {
+  const hopDecay = opts?.hopDecay ?? P.hopDecay, epsilon = opts?.epsilon ?? P.spreadEpsilon, maxHops = opts?.maxHops ?? P.maxHops;
+  let frontier = new Map(act); const fired = new Set<string>(); let hops = 0;
+  while (hops < maxHops && frontier.size) {
+    for (const id of frontier.keys()) fired.add(id); // each node spreads once; cycles cannot run out the ceiling
+    const next = new Map<string, number>();
+    for (const [i, a] of frontier) for (const [j, w] of neighbors(i)) {
+      if (!allow(j) || fired.has(j)) continue;
+      const add = a * w * hopDecay;
+      if (!(add > 0) || add < epsilon) continue;
+      next.set(j, (next.get(j) ?? 0) + add);
+    }
+    let mass = 0; for (const v of next.values()) mass += v;
+    if (!(mass > 0) || mass < epsilon) break;
+    for (const [j, add] of next) act.set(j, (act.get(j) ?? 0) + add);
+    frontier = next; hops++;
+  }
+  return hops;
+}
 
 export function retention(n: Pick<MemoryNode, "stability" | "lastAccess">, now: number) { return 1 / (1 + Math.max(0, now - n.lastAccess) / DAY / (9 * n.stability)); }
 export function tierFor(r: number): Tier { const [a, b, c] = P.tierRetention; return r >= a ? 0 : r >= b ? 1 : r >= c ? 2 : 3; }
 
-interface Plan { id: string; tier: Tier; enc: Enc; blob?: Buffer; payload?: Buffer; newChunks?: [string, Buffer][]; cost: number; lossy: boolean; fid: { rouge: number; char: number }; recon?: Buffer; keeps?: MemoryNode["keeps"]; alg: string; }
+interface Plan { id: string; tier: Tier; enc: Enc; blob?: Buffer; payload?: Buffer; newChunks?: [string, Buffer][]; cost: number; lossy: boolean; fid: Fid; recon?: Buffer; keeps?: MemoryNode["keeps"]; alg: string; }
 interface PackOut { pack: "cool" | "cold"; tier: 2 | 3; codec: string; dict: string | null; data: Buffer | null; entries: Record<string, Buffer> }
-interface Row { id: string; tier: Tier; rawBytes: number; cost: number; fid: number; cfid?: number; alg: string; schema?: string; kind: string; }
-export interface TierReport { tier: string; target: string; floor: number; lossless: boolean; before: Agg; expected: Agg; after: Agg; movedIn: number; }
-interface Agg { nodes: number; rawBytes: number; storedBytes: number; ratio: number; fidelity: number; minFidelity: number; charFidelity: number; algorithms: Record<string, number>; }
+interface Row { id: string; tier: Tier; rawBytes: number; cost: number; fid: number; cfid?: number; sfid?: number; alg: string; schema?: string; kind: string; }
+export interface TierReport { tier: string; target: string; floor: number; charFloor: number; semanticFloor: number; lossless: boolean; before: Agg; expected: Agg; after: Agg; movedIn: number; }
+interface Agg { nodes: number; rawBytes: number; storedBytes: number; ratio: number; fidelity: number; minFidelity: number; charFidelity: number; semanticFidelity: number; algorithms: Record<string, number>; }
 export interface PassReport { at: string; dryRun: boolean; moves: Record<string, number>; tiers: TierReport[]; schemas: { count: number; created: number; storedBytes: number }; dictionary: string | null;
   totals: { rawBytes: number; storedBefore: number; storedExpected: number; storedAfter: number; ratioBefore: number; ratioExpected: number; ratioAfter: number }; alert: BudgetAlert | null; text: string; }
 
@@ -60,6 +104,8 @@ export interface EngineOpts { dir: string; newId?: () => string; now?: () => num
 export class MemoryEngine {
   readonly dir: string; now: () => number; newId: () => string; embedder: Embedder; summarizer: Summarizer; budgetBytes: number; store: RawStore;
   nodes = new Map<string, MemoryNode>(); edges = new Map<string, number>();
+  /** When an edge was last set. Missing ⇒ decay from lastSleep, capped by the newer endpoint's createdAt. Not part of the MCP API. */
+  private edgeAt = new Map<string, number>();
   meta: { lastSleep: number; lastId: string; alert: BudgetAlert | null; dict: string | null; lastReport: PassReport | null } = { lastSleep: 0, lastId: "", alert: null, dict: null, lastReport: null };
   private listeners: Listener[] = []; private log: (m: string) => void;
 
@@ -110,7 +156,18 @@ export class MemoryEngine {
   }
   private key(a: string, b: string) { return a < b ? `${a}|${b}` : `${b}|${a}`; }
   weight(a: string, b: string) { return this.edges.get(this.key(a, b)) ?? 0; }
-  setWeight(a: string, b: string, w: number) { if (a !== b) this.edges.set(this.key(a, b), Math.min(1, Math.max(0, w))); }
+  setWeight(a: string, b: string, w: number) {
+    if (a === b) return;
+    const k = this.key(a, b);
+    this.edgeAt.set(k, this.now()); // strengthening resets the decay clock
+    this.edges.set(k, Math.min(P.edgeCap, Math.max(0, w))); // explicit cap after strengthening
+  }
+  private edgeElapsed(key: string, now: number): number {
+    const [a, b] = key.split("|");
+    const born = Math.max(this.nodes.get(a)?.createdAt ?? 0, this.nodes.get(b)?.createdAt ?? 0, this.edgeAt.get(key) ?? 0);
+    const anchor = Math.max(this.meta.lastSleep, born);
+    return anchor ? Math.max(0, now - anchor) : 0;
+  }
   neighbors(id: string): [string, number][] { const out: [string, number][] = []; for (const [k, w] of this.edges) { const [a, b] = k.split("|"); if (a === id) out.push([b, w]); else if (b === id) out.push([a, w]); } return out; }
   episodes() { return [...this.nodes.values()].filter(n => n.kind === "episodic"); }
 
@@ -162,13 +219,9 @@ export class MemoryEngine {
     const act = new Map<string, number>(); const via = new Map<string, "cue" | "spread">();
     for (const n of this.episodes()) { const s = cosine(cv, n.vector); if (s >= P.minCueSim) { act.set(n.id, s * (0.5 + 0.5 * retention(n, now))); via.set(n.id, "cue"); } }
     const amax = Math.max(0.5, ...act.values()); for (const [i, a] of act) act.set(i, a / amax);
-    let frontier = new Map(act);
-    for (let h = 0; h < P.hops; h++) {
-      const next = new Map<string, number>();
-      for (const [i, a] of frontier) for (const [j, w] of this.neighbors(i)) { if (this.nodes.get(j)?.kind !== "episodic") continue; const add = a * w * P.hopDecay; if (add >= 0.01) next.set(j, (next.get(j) ?? 0) + add); }
-      for (const [j, add] of next) { act.set(j, (act.get(j) ?? 0) + add); if (!via.has(j)) via.set(j, "spread"); }
-      frontier = next;
-    }
+    const seeded = new Set(act.keys());
+    spreadActivation(act, id => this.neighbors(id), id => this.nodes.get(id)?.kind === "episodic");
+    for (const id of act.keys()) if (!seeded.has(id)) via.set(id, "spread");
     const top = Math.max(1, ...act.values()); for (const [i, a] of act) act.set(i, a / top); // keep ranking, scale to ≤1
     const winners = [...act].filter(([, a]) => a >= P.threshold).sort((a, b) => b[1] - a[1]).slice(0, k);
     this.emit({ type: "recall", cue, activation: Object.fromEntries(act), winners: winners.map(w => w[0]) });
@@ -202,11 +255,29 @@ export class MemoryEngine {
     }
     return out;
   }
+  private localSim(raw: string, hyp: string) { return cosine(localTf(raw), localTf(hyp)); }
+  private meetsLossy(fid: Fid, tier: 2 | 3) {
+    const t = TIERS[tier];
+    return fid.rouge >= t.floor && fid.char >= t.charFloor && (fid.semantic ?? 0) >= t.semanticFloor;
+  }
   private residKeeps(n: MemoryNode, raw: string) {
-    const schema = this.text(n.schema!); const p = residPlan(schema, raw, [TIERS[2].floor, TIERS[3].floor]);
-    const cold = Math.min(p.hunks.length, Math.max(p.keeps[1], Math.min(P.coldKeyResiduals, p.keeps[0]))); // gist + key residuals
-    const fidAt = (k: number) => { const r = apply(schema, p.hunks.slice(0, k)); return { rouge: round(rougeL(raw, r)), char: round(charSim(raw, r)) }; };
-    return { hunks: p.hunks, keeps: { cool: p.keeps[0], cold, total: p.hunks.length, fidCool: fidAt(p.keeps[0]), fidCold: fidAt(cold) }, schema };
+    const schema = this.text(n.schema!);
+    const sim = (hyp: string) => this.localSim(raw, hyp);
+    const p = residPlan(schema, raw, [
+      { rouge: TIERS[2].floor, char: TIERS[2].charFloor, semantic: TIERS[2].semanticFloor },
+      { rouge: TIERS[3].floor, char: TIERS[3].charFloor, semantic: TIERS[3].semanticFloor },
+    ], sim);
+    const fidAt = (k: number): Fid => {
+      const r = apply(schema, p.hunks.slice(0, k));
+      return { rouge: round(rougeL(raw, r)), char: round(charSim(raw, r)), semantic: round(sim(r)) };
+    };
+    // Both gates already chose these keeps. Bump if a later adjustment (key residual) or a non-monotonic
+    // prefix would otherwise commit a lossy encode under a floor. All hunks reconstruct exactly.
+    let cool = p.keeps[0];
+    while (cool < p.hunks.length && !this.meetsLossy(fidAt(cool), 2)) cool++;
+    let cold = Math.min(p.hunks.length, Math.max(p.keeps[1], Math.min(P.coldKeyResiduals, p.keeps[0])));
+    while (cold < p.hunks.length && !this.meetsLossy(fidAt(cold), 3)) cold++;
+    return { hunks: p.hunks, keeps: { cool, cold, total: p.hunks.length, fidCool: fidAt(cool), fidCold: fidAt(cold) }, schema };
   }
   private planNode(n: MemoryNode, tier: Tier): Plan {
     const lossless = !n.lossy; const raw = lossless ? this.readRaw(n) : undefined;
@@ -256,41 +327,65 @@ export class MemoryEngine {
   private rowsFromDisk(): Row[] {
     const refs = new Map<string, number>(); for (const n of this.nodes.values()) if (n.enc.enc === "chunks") for (const h of n.enc.chunks) refs.set(h, (refs.get(h) ?? 0) + 1);
     const pks = Object.fromEntries((["cool", "cold"] as const).map(k => { let pack: { entries: Record<string, Buffer> }; try { pack = this.store.pack(k); } catch { pack = { entries: {} }; } return [k, { size: this.store.packSize(k), total: Object.values(pack.entries).reduce((a, b) => a + b.length, 0), entries: pack.entries }]; }));
-    return [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, rawBytes: n.rawBytes, cost: this.diskCost(n, refs, pks), fid: n.fid.rouge, cfid: n.fid.char, alg: algOf(n.enc), schema: n.lossy || n.enc.enc === "resid" || (n.enc.enc === "pack" && n.enc.inner === "resid") ? n.schema : undefined, kind: n.kind }));
+    return [...this.nodes.values()].map(n => ({ id: n.id, tier: n.tier, rawBytes: n.rawBytes, cost: this.diskCost(n, refs, pks), fid: n.fid.rouge, cfid: n.fid.char, sfid: n.fid.semantic ?? (n.lossy ? undefined : 1), alg: algOf(n.enc), schema: n.lossy || n.enc.enc === "resid" || (n.enc.enc === "pack" && n.enc.inner === "resid") ? n.schema : undefined, kind: n.kind }));
   }
   private aggregate(rows: Row[]) {
     const schemaCost = new Map(rows.filter(r => r.kind === "schema").map(r => [r.id, r.cost]));
     const users = new Map<string, number>(); for (const r of rows) if (r.schema) users.set(r.schema, (users.get(r.schema) ?? 0) + 1);
-    const tiers: Agg[] = TIER_NAMES.map(() => ({ nodes: 0, rawBytes: 0, storedBytes: 0, ratio: 0, fidelity: 0, minFidelity: 1, charFidelity: 0, algorithms: {} }));
+    const tiers: Agg[] = TIER_NAMES.map(() => ({ nodes: 0, rawBytes: 0, storedBytes: 0, ratio: 0, fidelity: 0, minFidelity: 1, charFidelity: 0, semanticFidelity: 0, algorithms: {} }));
+    const semSum = [0, 0, 0, 0], semN = [0, 0, 0, 0];
     let schemaStored = 0;
     for (const r of rows) {
       if (r.kind === "schema") { schemaStored += r.cost; continue; }
       const a = tiers[r.tier]; const share = r.schema ? (schemaCost.get(r.schema) ?? 0) / (users.get(r.schema) ?? 1) : 0;
       a.nodes++; a.rawBytes += r.rawBytes; a.storedBytes += r.cost + share; a.fidelity += r.fid; a.charFidelity += r.cfid ?? 1; a.minFidelity = Math.min(a.minFidelity, r.fid); a.algorithms[r.alg] = (a.algorithms[r.alg] ?? 0) + 1;
+      if (r.sfid !== undefined) { semSum[r.tier] += r.sfid; semN[r.tier]++; }
     }
-    for (const a of tiers) { a.storedBytes = Math.round(a.storedBytes); a.ratio = a.storedBytes ? round(a.rawBytes / a.storedBytes) : 0; a.fidelity = a.nodes ? round(a.fidelity / a.nodes) : 0; a.charFidelity = a.nodes ? round(a.charFidelity / a.nodes) : 0; a.minFidelity = a.nodes ? round(a.minFidelity) : 0; }
+    for (let i = 0; i < tiers.length; i++) { const a = tiers[i]; a.storedBytes = Math.round(a.storedBytes); a.ratio = a.storedBytes ? round(a.rawBytes / a.storedBytes) : 0; a.fidelity = a.nodes ? round(a.fidelity / a.nodes) : 0; a.charFidelity = a.nodes ? round(a.charFidelity / a.nodes) : 0; a.minFidelity = a.nodes ? round(a.minFidelity) : 0; a.semanticFidelity = semN[i] ? round(semSum[i] / semN[i]) : 0; }
     const raw = rows.filter(r => r.kind !== "schema").reduce((s, r) => s + r.rawBytes, 0); const stored = Math.round(rows.reduce((s, r) => s + r.cost, 0));
     return { tiers, raw, stored, schemaStored: Math.round(schemaStored) };
   }
 
   // ================= sleep / compression pass =================
-  /** Schema formation (mammal-like consolidation): clusters of similar lossless episodes get a prototype memory (the medoid). */
+  /** Schema formation. Permanent membership needs vector similarity and a second lexical/residual signal. Near-misses stay provisional (`schemaHold`) and are re-checked on the next sleep — a miss never accumulates into permanence. */
   private formSchemas(): number {
     const schemas = [...this.nodes.values()].filter(n => n.kind === "schema"); let created = 0;
     const free = this.episodes().filter(n => !n.schema && !n.lossy);
-    for (const n of free) { let b: MemoryNode | undefined, bs = P.schemaSim; for (const s of schemas) { const c = cosine(n.vector, s.vector); if (c > bs) { bs = c; b = s; } } if (b) { n.schema = b.id; b.members!.push(n.id); this.saveNode(n); this.saveNode(b); } }
+    const textOf = new Map<string, string>();
+    const txt = (n: MemoryNode) => { let t = textOf.get(n.id); if (t === undefined) { t = this.text(n.id); textOf.set(n.id, t); } return t; };
+    const judge = (n: MemoryNode, s: MemoryNode) => {
+      if (n.id === s.id) return { v: "permanent" as SchemaLink, sim: 1 };
+      const sim = cosine(n.vector, s.vector);
+      return { v: schemaVerdict(sim, schemaSecondScore(txt(s), txt(n))), sim };
+    };
+    for (const n of free) {
+      let best: { s: MemoryNode; v: SchemaLink; sim: number } | undefined;
+      for (const s of schemas) {
+        const j = judge(n, s);
+        if (j.v === "reject") continue;
+        if (!best || (j.v === "permanent" && best.v !== "permanent") || (j.v === best.v && j.sim > best.sim)) best = { s, v: j.v, sim: j.sim };
+      }
+      if (best?.v === "permanent") { delete n.schemaHold; n.schema = best.s.id; best.s.members!.push(n.id); this.saveNode(n); this.saveNode(best.s); }
+      else if (best) { n.schemaHold = best.s.id; this.saveNode(n); }
+      else if (n.schemaHold) { delete n.schemaHold; this.saveNode(n); }
+    }
     const left = free.filter(n => !n.schema); const used = new Set<string>();
     for (const a of left) {
       if (used.has(a.id)) continue;
       const cl = [a, ...left.filter(b => b !== a && !used.has(b.id) && cosine(a.vector, b.vector) >= P.schemaSim)];
       if (cl.length < P.schemaMin) continue;
-      cl.forEach(c => used.add(c.id));
       const medoid = cl.map(c => ({ c, s: cl.reduce((acc, d) => acc + cosine(c.vector, d.vector), 0) })).sort((x, y) => y.s - x.s)[0].c;
+      const judged = cl.map(node => ({ node, ...judge(node, medoid) }));
+      const permanent = judged.filter(j => j.v === "permanent").map(j => j.node);
+      const provisional = judged.filter(j => j.v === "provisional").map(j => j.node);
+      if (permanent.length < P.schemaMin) continue; // do not stick a cosine-only cluster
+      permanent.forEach(c => used.add(c.id));
       const sraw = this.readRaw(medoid);
-      const s: MemoryNode = { ...structuredClone(medoid), id: this.newId(), kind: "schema", pinned: true, members: cl.map(c => c.id), tier: 0, enc: { enc: "plain" }, schema: undefined, tags: ["schema"], salience: 1 };
+      const s: MemoryNode = { ...structuredClone(medoid), id: this.newId(), kind: "schema", pinned: true, members: permanent.map(c => c.id), tier: 0, enc: { enc: "plain" }, schema: undefined, schemaHold: undefined, tags: ["schema"], salience: 1 };
       this.vecSrc.set(s.id, JSON.stringify(localTf(sraw.toString("utf8") + " ")) === JSON.stringify(s.vector));
       this.store.writeFile(`${s.id}.txt`, sraw); this.nodes.set(s.id, s); this.saveNode(s); created++;
-      for (const c of cl) { c.schema = s.id; this.saveNode(c); this.setWeight(s.id, c.id, 0.8); }
+      for (const c of permanent) { delete c.schemaHold; c.schema = s.id; this.saveNode(c); this.setWeight(s.id, c.id, 0.8); }
+      for (const c of provisional) if (!c.schema) { c.schemaHold = s.id; this.saveNode(c); }
       schemas.push(s);
     }
     return created;
@@ -339,7 +434,7 @@ export class MemoryEngine {
       if (po) { const tot = Object.values(po.entries).reduce((a, b) => a + b.length, 0); cost = ((po.data?.length ?? 0) + po.codec.length + 15) * (po.entries[r.id]?.length ?? 0) / (tot || 1); }
       const lossyResid = p ? (p.enc.enc === "resid" || (p.enc.enc === "pack" && p.enc.inner === "resid")) : !!r.schema;
       const alg = po ? `pack(${po.pack}):${po.codec}${po.dict ? "+dict" : ""}:${p ? (p.enc.enc === "pack" ? p.enc.inner : "") : r.alg.split(":").pop()}` : p ? p.alg : r.alg;
-      return { ...r, tier, cost, fid: p ? p.fid.rouge : r.fid, cfid: p ? p.fid.char : r.cfid, alg, schema: lossyResid ? n.schema : undefined };
+      return { ...r, tier, cost, fid: p ? p.fid.rouge : r.fid, cfid: p ? p.fid.char : r.cfid, sfid: p ? (p.fid.semantic ?? (p.lossy ? undefined : 1)) : r.sfid, alg, schema: lossyResid ? n.schema : undefined };
     });
     const expected = this.aggregate(rowsExp);
     if (!opts.dryRun) this.commit(plans, packOuts);
@@ -348,7 +443,7 @@ export class MemoryEngine {
     const report: PassReport = {
       at: new Date(now).toISOString(), dryRun: !!opts.dryRun, moves, dictionary: this.meta.dict,
       schemas: { count: [...this.nodes.values()].filter(n => n.kind === "schema").length, created: opts.schemasCreated ?? 0, storedBytes: after.schemaStored },
-      tiers: TIERS.map((t, i) => ({ tier: t.name, target: `${t.target[0]}–${t.target[1]}x`, floor: t.floor, lossless: t.lossless, before: before.tiers[i], expected: expected.tiers[i], after: after.tiers[i], movedIn: plans.filter(p => p.tier === i).length })),
+      tiers: TIERS.map((t, i) => ({ tier: t.name, target: `${t.target[0]}–${t.target[1]}x`, floor: t.floor, charFloor: t.charFloor, semanticFloor: t.semanticFloor, lossless: t.lossless, before: before.tiers[i], expected: expected.tiers[i], after: after.tiers[i], movedIn: plans.filter(p => p.tier === i).length })),
       totals: { rawBytes: after.raw, storedBefore: before.stored, storedExpected: expected.stored, storedAfter: after.stored, ratioBefore: ratio(before.raw, before.stored), ratioExpected: ratio(expected.raw, expected.stored), ratioAfter: ratio(after.raw, after.stored) },
       alert: this.meta.alert, text: "",
     };
@@ -392,9 +487,11 @@ export class MemoryEngine {
 
   async sleep(opts: { dryRun?: boolean } = {}) {
     if (opts.dryRun) return this.pass({ dryRun: true });
+    const now = this.now();
+    for (const [k, w] of this.edges) this.edges.set(k, decayEdgeWeight(w, this.edgeElapsed(k, now)));
+    this.edgeAt.clear(); // decay has been applied through `now`; new edges below stamp themselves
     const created = this.formSchemas(); this.trainDict();
-    for (const [k, w] of this.edges) this.edges.set(k, Math.max(0.05, w * 0.95));
-    this.meta.lastSleep = this.now();
+    this.meta.lastSleep = now;
     // synaptic pruning: weak associations beyond each node's strongest few are forgotten (memories themselves never are)
     const keep = new Set(sparsify(this.edges).map(e => e[0])); for (const k of [...this.edges.keys()]) if (!keep.has(k)) this.edges.delete(k);
     return this.pass({ schemasCreated: created, recode: true });
@@ -434,13 +531,13 @@ export class MemoryEngine {
     const n = this.nodes.get(id); if (!n) return null; const now = this.now();
     const preview = P.tierRetention.map((x, i) => ({ tier: TIER_NAMES[i + 1], inDays: round(Math.max(0, 9 * n.stability * (1 / x - 1) - (now - n.lastAccess) / DAY)) }));
     return { node: { ...n, vector: undefined }, retention: round(retention(n, now)), storage: `${TIER_NAMES[n.tier]}/${algOf(n.enc)}`, exact: !n.lossy, fidelity: n.fid, text: this.text(id), neighbors: this.neighbors(id), colderTierPreview: preview,
-      protected: n.salience >= SALIENT ? "high salience: always lossless" : n.schema ? "may be stored as schema+residual in cool/cold" : "no schema yet: lossless" };
+      protected: n.salience >= SALIENT ? "high salience: always lossless" : n.schema ? "may be stored as schema+residual in cool/cold" : n.schemaHold ? "provisional schema candidate: still lossless until the near dual-check passes" : "no schema yet: lossless" };
   }
   stats() {
     const now = this.now(); const a = this.aggregate(this.rowsFromDisk()); const eps = this.episodes();
     return {
       memories: eps.length, schemas: this.nodes.size - eps.length, edges: this.edges.size,
-      tiers: TIERS.map((t, i) => ({ tier: t.name, target: `${t.target[0]}–${t.target[1]}x`, floor: t.floor, ...a.tiers[i] })),
+      tiers: TIERS.map((t, i) => ({ tier: t.name, target: `${t.target[0]}–${t.target[1]}x`, floor: t.floor, charFloor: t.charFloor, semanticFloor: t.semanticFloor, ...a.tiers[i] })),
       rawBytes: a.raw, storedBytes: a.stored, compressionRatio: ratio(a.raw, a.stored), schemaBytes: a.schemaStored,
       lossyMemories: eps.filter(n => n.lossy).length, minFidelity: round(Math.min(1, ...eps.map(n => n.fid.rouge))), unrecoverable: this.verify().length,
       ...this.footprint(), budgetBytes: Number.isFinite(this.budgetBytes) ? this.budgetBytes : null, overBudget: !!this.meta.alert, alert: this.meta.alert,
@@ -462,11 +559,12 @@ const round = (x: number) => Math.round(x * 1000) / 1000;
 const ratio = (a: number, b: number) => b ? round(a / b) : 0;
 function best(c: Plan[]) { return c.sort((a, b) => a.cost - b.cost)[0]; }
 export function renderReport(r: PassReport): string {
-  const f = (a: Agg) => `${a.nodes}n ${a.rawBytes}→${a.storedBytes}B ${a.ratio}x ROUGE-L ${a.fidelity} (min ${a.minFidelity}) char ${a.charFidelity}`;
+  const f = (a: Agg) => `${a.nodes}n ${a.rawBytes}→${a.storedBytes}B ${a.ratio}x ROUGE-L ${a.fidelity} (min ${a.minFidelity}) char ${a.charFidelity} sem ${a.semanticFidelity}`;
+  const floor = (t: TierReport) => t.lossless ? "lossless" : `ROUGE-L≥${t.floor} char≥${t.charFloor} sem≥${t.semanticFloor}`;
   const lines = [`=== compression pass ${r.at}${r.dryRun ? " (DRY RUN — nothing written)" : ""} ===`,
     `moves: ${Object.entries(r.moves).map(([k, v]) => `${k} ${v}`).join(", ") || "none"} · schemas ${r.schemas.count} (+${r.schemas.created}, ${r.schemas.storedBytes}B) · dict ${r.dictionary ?? "-"}`,
     `tier | target (floor) | before | expected | after | algorithms`];
-  for (const t of r.tiers) lines.push(`${t.tier.padEnd(4)} | ${t.target} (${t.lossless ? "lossless" : "ROUGE-L≥" + t.floor}) | ${f(t.before)} | ${f(t.expected)} | ${f(t.after)} | ${Object.entries(t.after.algorithms).map(([k, v]) => `${k}×${v}`).join(" ")}`);
+  for (const t of r.tiers) lines.push(`${t.tier.padEnd(4)} | ${t.target} (${floor(t)}) | ${f(t.before)} | ${f(t.expected)} | ${f(t.after)} | ${Object.entries(t.after.algorithms).map(([k, v]) => `${k}×${v}`).join(" ")}`);
   lines.push(`total stored ${r.totals.storedBefore}B → expected ${r.totals.storedExpected}B → actual ${r.totals.storedAfter}B (raw ${r.totals.rawBytes}B; ratio ${r.totals.ratioBefore}x → ${r.totals.ratioAfter}x)`);
   if (r.alert) lines.push(`⚠️ ${r.alert.message}`);
   return lines.join("\n");
