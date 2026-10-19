@@ -1,6 +1,8 @@
 # Friction log
 
-Every entry happened during development of this project (Oct 14, 2026). Severity scale: **Blocker** / **High** / **Medium** / **Low**.
+Optional Devpost field (up to a **10% judging bonus** per Official Rules). Every entry happened during development of this project (Oct 14, 2026). Severity scale: **Blocker** / **High** / **Medium** / **Low**.
+
+> Paste each F-entry into Devpost friction-log fields: task, steps, expected vs actual, severity, workaround, suggestion.
 
 ### F1: zstd unavailable on the default Node runtime
 - **Task:** use zstd (with dictionaries) as the warm-tier codec.
@@ -44,7 +46,7 @@ Every entry happened during development of this project (Oct 14, 2026). Severity
 - **Expected:** schema + residual plus a strong codec reaches the targets.
 - **Actual:** compressing each memory on its own gave 3.4x cool and 6x cold. Per-object codec overhead (zstd frame headers of about 10 B) dominates 100-byte texts.
 - **Severity:** Medium (design change).
-- **Workaround:** shared tier archives (cool and cold), compact residual encoding (`[pos, del, "ins"]`, no scores stored), and a trained dictionary. Result (current code, test corpus): cool 5.0–5.2x, cold 7.5–8.9x. Targets re-set from the data and documented.
+- **Workaround:** shared tier archives (cool and cold), compact residual encoding (`[pos, del, "ins"]`, no scores stored), and a trained dictionary. Result (current code, test corpus, re-measured 2026-10-19 after the engine merge): cool 4.9–5.2x (mean ROUGE-L 0.93; floors ROUGE-L ≥ 0.90 and char ≥ 0.85, local semantic ≥ 0.80), cold 7.4–8.7x (mean ROUGE-L 0.76; floors ROUGE-L and char ≥ 0.65, local semantic ≥ 0.50). Targets re-set from the data and documented.
 - **Suggestion (for MCP memory builders):** publish expected compression ranges for agent-memory-sized texts. Most codec benchmarks use MB-sized corpora.
 
 ### F6: delta-encoding cycle within one pass
@@ -80,7 +82,7 @@ Every entry happened during development of this project (Oct 14, 2026). Severity
 - **Expected:** the budget is dominated by memory content.
 - **Actual:** 5 KB of compressed content, but about 250 KB of per-node JSON (full float vectors, 64-character hashes, summaries duplicating short texts), 88 KB of edge JSON, and 60 KB of stale zstd dictionaries. The budget alert reported 315 KB.
 - **Severity:** Medium. The numbers looked wrong and made the budget meaningless.
-- **Workaround:** a single zstd-compressed `index.bin`: derived fields re-computed, 64-bit hash tags, binary uint8 edge weights, top-6 edge pruning during sleep, dictionary capped at 1/6 of raw, and stale-dictionary re-encoding. Result: 16.6 KB total (content 5.3 KB, dictionary 2.6 KB, index 8.7 KB).
+- **Workaround:** a single zstd-compressed `index.bin`: derived fields re-computed, 64-bit hash tags, binary uint8 edge weights, top-6 edge pruning during sleep, dictionary capped at 1/6 of raw, and stale-dictionary re-encoding. Result (re-measured 2026-10-19 after the engine merge): ~17.9 KB total (content ~5.2 KB, dictionary ~3.4 KB, index ~9.3 KB).
 - **Suggestion:** when building on-disk agent memory, budget the index from day one. With ~100-byte memories, metadata is the dominant cost.
 
 ### F10: `readline/promises` throws when piped stdin ends
