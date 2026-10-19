@@ -61,6 +61,17 @@ Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/e
 
 **Why these targets.** Agent memories are short: about 50–600 B, about 165 B on average in our corpus. On text that short, per-object codec overhead dominates. That is why warm relies on a trained dictionary and delta, and why cool/cold share an archive. The 8–15x / 20–50x targets suggested at the start only make sense for multi-KB documents. The targets above match what the realistic corpus actually reaches (see the tests).
 
+**Measured per tier (current engine).** Test corpus: 290 memories (47.9 KB raw, about 165 B each), 60 days lived, then sleeps at +7, +30, +90, +180 and +365 days; ranges cover 5 runs (2026-10-19).
+
+| Tier | How stored | Ratio | Fidelity / QA retention |
+|---|---|---|---|
+| hot | as-is or LZ4 | 1.0x | lossless |
+| warm | zstd / brotli / LZ4 with a trained dictionary, delta, chunk dedup | 2.6–2.9x | lossless |
+| cool | schema + residual diff in a shared archive | 4.9–5.2x | every memory clears ROUGE-L ≥ 0.90, char ≥ 0.85, local semantic ≥ 0.80 (mean ROUGE-L 0.93); QA retention 87–89% |
+| cold | schema + key residuals in a shared archive | 7.4–8.7x | ROUGE-L mean 0.76, minimum 0.65; QA retention 64% at +30 days, 61% after a year |
+
+Tier ratios are content-only; whole-store total including index and links: 2.6x on the synthetic corpus, 1.5x on real notes (real notes' cold tier is ~2.1x because they rarely share templates). QA retention comes from a local rule-based probe (no LLM): cloze questions on numbers, dates, names and relations, answered by an extractive reader; it is accuracy on the reconstruction divided by accuracy on the original. Treat it as a rough reference, not an LLM-judged score.
+
 **Schema consolidation (mammal-like).** During `sleep()`, lossless episodes with cosine similarity ≥ 0.35 are candidates (minimum 3). Membership becomes **permanent** only after a near dual-check: vector similarity and a second signal (surface-token overlap, character-trigram overlap, or residual fidelity of the prototype) both clear their floors. A near-miss stays **provisional** (`schemaHold`) and is re-checked on the next sleep; missing the check does not accumulate into a permanent link. Only permanent members are copied onto the pinned, always-lossless **schema** (the medoid) and may later be stored lossily. Each of those members is a token-level diff against the schema (hunks `[pos, del, insert]`). Hunks are ordered by importance: digits ×3, capitalised words ×2, CJK ×1.5, other text ×1, divided by size. Greedy selection keeps the fewest hunks that clear the tier's ROUGE-L floor **and** its char-similarity floor **and** (cool/cold) the local-embedding cosine floor. The semantic check uses the offline local term-frequency embedder, not a network provider. Cold keeps at least one key residual. Dropped details revert to the schema's wording, which is the same "filling in" human recall does. Provisional candidates stay lossless.
 
 **Guarantees.**
