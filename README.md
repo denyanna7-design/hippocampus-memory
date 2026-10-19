@@ -88,11 +88,11 @@ Tier ratios are content-only; whole-store total including index and links: 2.6x 
 | Store | Raw | Content | Dictionary | Index | Total on disk |
 |---|---|---|---|---|---|
 | `alexa:demo:full` (151 memories, 30 days) | 23.7 KB | 5.3 KB | 2.6–3.5 KB | 8.7 KB | 16.6–17.3 KB |
-| test corpus (290 memories, 60 days + 1 simulated year) | 46.8 KB | 5.5 KB | 1.0 KB | 14.6 KB | 21.1 KB |
+| test corpus (290 memories, 60 days + 1 simulated year) | 47.9 KB | 5.7 KB | 1.0 KB | 11.5 KB | 18.2–18.3 KB (2.6x) |
 | `alexa:demo:video` (52 memories, 14 days) | 5.1 KB | 1.8 KB | 1.0 KB | 3.3 KB | 6.1 KB |
 | before the compact index (`alexa:demo:full`) | 23.7 KB | 5.0 KB | 60.3 KB | ~250 KB | ~308 KB |
 
-The size table was measured before lossy nodes also stored a semantic-fidelity number, so a store built now can be slightly larger. Demo runs vary slightly between runs, because the server clock is real time plus the simulated skips. The index costs about 50–65 B per memory (an 8-character id, a 64-bit hash, tier/encoding and fidelity numbers, timestamps, and on average four or five pruned edges). Content for these short memories compresses to about 35 B each, so the index is still larger than the content. It is about a third of the raw size, and is now proportional to the number of memories rather than the dominant cost.
+The test-corpus row was re-measured on the current engine (5 runs, 2026-10-19; KB = 1000 B). The demo rows were measured before lossy nodes also stored a semantic-fidelity number, so a demo store built now can be slightly larger. Demo runs vary slightly between runs, because the server clock is real time plus the simulated skips. The index costs about 50–65 B per memory (an 8-character id, a 64-bit hash, tier/encoding and fidelity numbers, timestamps, and on average four or five pruned edges). Content for these short memories compresses to about 35 B each, so the index is still larger than the content. It is about a third of the raw size, and is now proportional to the number of memories rather than the dominant cost.
 
 **Compression report.** Every pass (`sleep`, time-skip, budget enforcement) produces a per-tier report with: target ratio and fidelity floors (ROUGE-L, char similarity, local-embedding cosine), before / expected (planned) / after for nodes, raw→stored bytes, ratio, ROUGE-L mean and minimum, char similarity, semantic similarity, algorithms used, and moves. It is returned by `sleep`, stored in `memory_stats.lastReport`, and appended to `data/memory/compaction.log` as text plus a JSON line. `compress_preview` (or `GET /api/preview`) is a dry run that writes nothing. It doesn't form new schemas; those are created at the start of a real `sleep`.
 
