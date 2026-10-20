@@ -9,7 +9,7 @@ Agents usually "remember" by stuffing logs into the context window. **Hippocampu
 - **sleep** consolidates similar episodes into **schemas** and compresses faded memories through **graded tiers**: lossless hot/warm, then schema + residual in cool/cold with measured fidelity floors;
 - every pass produces a **compression report**;
 - nothing is ever deleted, and no memory ever becomes unrecoverable;
-- when the storage budget runs out, the server **asks the user** instead of deleting.
+- when the storage budget runs out, the server raises an **alert** and asks the user to decide, instead of deleting.
 
 Built for the Amazon Developer Hackathon, Alexa+ track. MIT licensed.
 
