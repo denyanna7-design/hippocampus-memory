@@ -128,3 +128,13 @@ Demo REST helpers (not part of MCP):
 
 ## Demo
 The full shot list is in `submission/demo-video-script.md`. Short version: run `npm start`, open `http://localhost:3000/`, run `npm run alexa:demo:video` (or `alexa:demo:full`) in a second terminal and watch the graph light up, click 🔍 preview pass / 😴 sleep / ⏩ +7 days, then restart with `MEMORY_BUDGET_BYTES=5000` (after `alexa:demo:video`) to show the alert. The brain view is self-contained: a custom 60 fps canvas renderer and force layout, with no external libraries or CDN. It shows activation pulses with particle trails, a camera zoom to the recalled memory, and sleep as replay → fold into schemas → condense, with a byte counter and per-tier bars. Set `DEMO_EPOCH=<ms>` for a reproducible demo: the clock is frozen except for `/api/timeskip`, and ids are deterministic, so two runs produce byte-identical stores. The budget alert is derived state. It is recomputed at startup and not stored in the index, so the alert and `memory_stats` always report the same total.
+
+## Related work
+
+Hippocampus-inspired memory for AI agents is an active area, and we build on ideas from several projects:
+
+- **[HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG)** (NeurIPS 2024) models hippocampal indexing theory: it builds a knowledge graph from extracted triples and retrieves with Personalized PageRank. It focuses on multi-hop retrieval, not on storage over time.
+- **[hippo-memory](https://github.com/kitfunso/hippo-memory)** (kitfunso) is a local memory layer for coding agents with half-life decay, retrieval strengthening, sleep-time merging of episodes and outcome feedback. Its published ablations are a model for honest evaluation.
+- **[MemPalace](https://github.com/MemPalace/mempalace)** stores raw text with structured metadata and offers an optional lossy shorthand mode, and it publicly reports the retrieval cost of that mode.
+
+What this project adds is **fidelity-gated tiered compression**: memories move through hot, warm, cool and cold tiers. Hot and warm are lossless; cool and cold are lossy, and every lossy memory must clear measured fidelity floors (ROUGE-L, character similarity and local-embedding cosine). Every read is integrity-checked: lossless memories against the original, lossy ones against their stored reconstruction, where dropped details revert to the schema wording. Nothing is ever deleted: when the store is over budget, the server raises an alert instead. Every sleep cycle writes a compression report. Our compression ratios are measured in bytes; we have not yet measured retrieval accuracy after compression, and that is our next evaluation.
