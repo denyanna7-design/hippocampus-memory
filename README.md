@@ -1,6 +1,6 @@
 # Hippocampus — brain-inspired memory MCP server for Alexa+
 
-> Node ≥ 22.15 required (zstd). On the box: `export PATH=$HOME/.local/node22/bin:$PATH`.
+> Node ≥ 22.15 required (zstd).
 
 Agents usually "remember" by stuffing logs into the context window. **Hippocampus** is a self-hosted **MCP server (spec 2025-11-25, Streamable HTTP)** that gives Alexa+ a brain-like long-term memory:
 
@@ -15,7 +15,7 @@ Built for the Amazon Developer Hackathon, Alexa+ track. MIT licensed.
 
 ## Quick start
 ```bash
-# Node >= 22.15 is required for zstd (see .nvmrc). On the dev box: export PATH=$HOME/.local/node22/bin:$PATH
+# Node >= 22.15 is required for zstd (see .nvmrc)
 npm install
 npm start                    # MCP: http://localhost:3000/mcp · brain view: http://localhost:3000/
 npm run alexa:demo:full      # in a 2nd terminal: simulated Alexa+ conversations across sessions (MCP client)
@@ -37,7 +37,7 @@ Alexa+ / any MCP client ──POST /mcp──► server.ts (stateless, one McpSe
               local TF vector       extractive | OpenAI-compat   index.bin (zstd-19 compact index)
                                                                  raw/<id>.txt|.z|.dz  chunks/<sha>.br
                                                                  packs/{cool,cold}.pack  dicts/<id>.dict
-Browser ──GET /──► public/index.html (vis-network) ◄──SSE /api/events (recall lights up nodes)
+Browser ──GET /──► public/index.html (custom canvas, no external libs) ◄──SSE /api/events (recall lights up nodes)
 ```
 
 ## Algorithms

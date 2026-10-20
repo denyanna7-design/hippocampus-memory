@@ -50,11 +50,11 @@ Primary track: **Alexa+**. Mini challenges: none at submission time; no AWS serv
 - **What needs work:** TypeScript 7 inferred `Record<string, Buffer> | {}` for a cache's empty-object branch, which broke indexing (TS7053) until I added an explicit return type. That's minor. Otherwise smooth.
 - **Again?** Yes.
 
-## 7. vis-network (CDN) for the brain view
-- **Used for:** live graph visualisation: activation flashes during recall, tier colours, node labels.
+## 7. vis-network (CDN): first brain view only, since replaced
+- **Used for:** the first version of the live graph (activation flashes during recall, tier colours, node labels). The shipped brain view (`public/index.html`) no longer uses it: since commit `25e6b16` it is a self-contained custom 60 fps canvas renderer + force layout with no external libraries or CDN.
 - **What worked well:** a DataSet plus incremental `update()` is perfect for streaming SSE events.
-- **What needs work:** I haven't tuned it for large graphs. Beyond a few hundred nodes, the default physics may need tweaking for a clean recording.
-- **Again?** Yes, for demos.
+- **What needs work:** I didn't tune it for large graphs. Beyond a few hundred nodes, the default physics may need tweaking for a clean recording.
+- **Again?** Yes, for quick prototypes.
 
 ## Feature requests (optional section)
 | Request | Why it matters | Priority |
